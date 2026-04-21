@@ -1,0 +1,48 @@
+import React, { useState } from 'react';
+import Dashboard from './pages/Dashboard';
+import Analytics from './pages/Analytics';
+import Reports from './pages/Reports';
+import './App.css';
+import LoginPage from './pages/Login';
+
+function App() {
+  const [currentPage, setCurrentPage] = useState('login');
+
+  const renderPage = () => {
+    switch (currentPage) {
+      case 'login':
+        return <LoginPage onNavigate={setCurrentPage} />;
+      case 'dashboard':
+        return <Dashboard onNavigate={setCurrentPage} />;
+      case 'analytics':
+        return <Analytics onNavigate={setCurrentPage} />;
+      case 'fuel-logs':
+        return <Reports onNavigate={setCurrentPage} />;
+      default:
+        return <Dashboard onNavigate={setCurrentPage} />;
+    }
+  };
+
+  // Use a wrapper that provides navigation context to pages
+  return (
+    <div className="App">
+      <NavigationProvider currentPage={currentPage} setCurrentPage={setCurrentPage}>
+        {renderPage()}
+      </NavigationProvider>
+    </div>
+  );
+}
+
+// Context wrapper to pass navigation to pages that need it
+const NavigationContext = React.createContext();
+
+const NavigationProvider = ({ children, currentPage, setCurrentPage }) => {
+  return (
+    <NavigationContext.Provider value={{ currentPage, setCurrentPage }}>
+      {children}
+    </NavigationContext.Provider>
+  );
+};
+
+export const useNavigation = () => React.useContext(NavigationContext);
+export default App;

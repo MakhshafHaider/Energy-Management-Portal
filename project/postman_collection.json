@@ -1,0 +1,228 @@
+{
+  "info": {
+    "_postman_id": "fleet-analytics-api-collection",
+    "name": "Fleet Vehicle Analytics API",
+    "description": "API collection for Fleet Vehicle Analytics backend. Provides endpoints for fleet management, vehicle tracking, and analytics calculations.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "item": [
+    {
+      "name": "Health Check",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{baseUrl}}/health",
+          "host": ["{{baseUrl}}"],
+          "path": ["health"]
+        },
+        "description": "Verify API is running and healthy"
+      },
+      "response": []
+    },
+    {
+      "name": "Get Fleet Vehicles",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{baseUrl}}/api/fleets/1735/vehicles",
+          "host": ["{{baseUrl}}"],
+          "path": ["api", "fleets", "1735", "vehicles"]
+        },
+        "description": "Retrieve all vehicle IDs belonging to fleet 1735"
+      },
+      "response": []
+    },
+    {
+      "name": "Get Fleet Vehicles with Sensors",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{baseUrl}}/api/fleets/1735/vehicles-with-sensors",
+          "host": ["{{baseUrl}}"],
+          "path": ["api", "fleets", "1735", "vehicles-with-sensors"]
+        },
+        "description": "Retrieve vehicles with their sensor mapping configurations"
+      },
+      "response": []
+    },
+    {
+      "name": "Get Vehicle Sensors",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{baseUrl}}/api/vehicles/{{vehicleId}}/sensors",
+          "host": ["{{baseUrl}}"],
+          "path": ["api", "vehicles", "{{vehicleId}}", "sensors"]
+        },
+        "description": "Get sensor configuration for a specific vehicle"
+      },
+      "response": []
+    },
+    {
+      "name": "Get Vehicle Analytics",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{baseUrl}}/api/vehicles/{{vehicleId}}/analytics?date={{date}}",
+          "host": ["{{baseUrl}}"],
+          "path": ["api", "vehicles", "{{vehicleId}}", "analytics"],
+          "query": [
+            {
+              "key": "date",
+              "value": "{{date}}"
+            }
+          ]
+        },
+        "description": "Calculate analytics for a single vehicle on a specific date"
+      },
+      "response": []
+    },
+    {
+      "name": "Get Fleet Analytics",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{baseUrl}}/api/fleets/1735/analytics?date={{date}}",
+          "host": ["{{baseUrl}}"],
+          "path": ["api", "fleets", "1735", "analytics"],
+          "query": [
+            {
+              "key": "date",
+              "value": "{{date}}"
+            }
+          ]
+        },
+        "description": "Calculate analytics for all vehicles in fleet 1735 on a specific date"
+      },
+      "response": []
+    },
+    {
+      "name": "Invalid Fleet ID (Negative Test)",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{baseUrl}}/api/fleets/abc/vehicles",
+          "host": ["{{baseUrl}}"],
+          "path": ["api", "fleets", "abc", "vehicles"]
+        },
+        "description": "Test validation error — should return 400 for non-numeric fleetId"
+      },
+      "response": []
+    },
+    {
+      "name": "Missing Date Parameter (Negative Test)",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{baseUrl}}/api/fleets/1735/analytics",
+          "host": ["{{baseUrl}}"],
+          "path": ["api", "fleets", "1735", "analytics"]
+        },
+        "description": "Test missing date parameter — should return validation error"
+      },
+      "response": []
+    },
+    {
+      "name": "Invalid Date Format (Negative Test)",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{baseUrl}}/api/fleets/1735/analytics?date=invalid-date",
+          "host": ["{{baseUrl}}"],
+          "path": ["api", "fleets", "1735", "analytics"],
+          "query": [
+            {
+              "key": "date",
+              "value": "invalid-date"
+            }
+          ]
+        },
+        "description": "Test invalid date format — should return 400 validation error"
+      },
+      "response": []
+    },
+    {
+      "name": "Future Date (Negative Test)",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{baseUrl}}/api/fleets/1735/analytics?date=2099-12-31",
+          "host": ["{{baseUrl}}"],
+          "path": ["api", "fleets", "1735", "analytics"],
+          "query": [
+            {
+              "key": "date",
+              "value": "2099-12-31"
+            }
+          ]
+        },
+        "description": "Test future date — should return 404 (tracking table not found)"
+      },
+      "response": []
+    },
+    {
+      "name": "Non-existent Fleet (Negative Test)",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{baseUrl}}/api/fleets/999999/vehicles",
+          "host": ["{{baseUrl}}"],
+          "path": ["api", "fleets", "999999", "vehicles"]
+        },
+        "description": "Test non-existent fleet — should return 404 not found"
+      },
+      "response": []
+    }
+  ],
+  "event": [
+    {
+      "listen": "prerequest",
+      "script": {
+        "type": "text/javascript",
+        "exec": [
+          ""
+        ]
+      }
+    },
+    {
+      "listen": "test",
+      "script": {
+        "type": "text/javascript",
+        "exec": [
+          ""
+        ]
+      }
+    }
+  ],
+  "variable": [
+    {
+      "key": "baseUrl",
+      "value": "http://localhost:3000",
+      "type": "string",
+      "description": "Base URL for the API"
+    },
+    {
+      "key": "vehicleId",
+      "value": "373157",
+      "type": "string",
+      "description": "Sample vehicle ID from fleet 1735"
+    },
+    {
+      "key": "date",
+      "value": "2026-04-15",
+      "type": "string",
+      "description": "Date for analytics queries (YYYY-MM-DD format)"
+    }
+  ]
+}
