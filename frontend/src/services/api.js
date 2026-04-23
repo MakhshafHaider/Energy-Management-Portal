@@ -337,6 +337,7 @@ export const getDashboardData = async (fleetId = 1735, date) => {
           fuelLevel: analytics.fuel || '-',
           fuelConsumption: analytics.fuelConsumption || 0,
           fuelTheft: analytics.fuelTheft || 0,
+          fuelTheftAt: analytics.fuelTheftAt || null,
           fuelRefilled: analytics.fuelRefilled || 0,
           engineHours: analytics.totalEngineHours || 0,
           workTime: analytics.workTime || 0,
@@ -421,6 +422,7 @@ function aggregateVehiclesAcrossDates(dayResults) {
             totalEngineHours:   a.totalEngineHours    ?? 0,
             fuelRefilled:       a.fuelRefilled        ?? 0,
             fuelTheft:          a.fuelTheft           ?? 0,
+            fuelTheftAt:        a.fuelTheftAt         ?? null,
             generatorStartTime: a.generatorStartTime  ?? null,
             generatorStopTime:  a.generatorStopTime   ?? null,
             workTime:           a.workTime            ?? 0,
@@ -434,6 +436,7 @@ function aggregateVehiclesAcrossDates(dayResults) {
         e.totalEngineHours = Math.round(((e.totalEngineHours || 0) + (a.totalEngineHours || 0)) * 100) / 100;
         e.fuelRefilled     = Math.round(((e.fuelRefilled     || 0) + (a.fuelRefilled     || 0)) * 100) / 100;
         e.fuelTheft        = Math.round(((e.fuelTheft        || 0) + (a.fuelTheft        || 0)) * 100) / 100;
+        if (!e.fuelTheftAt && a.fuelTheftAt) e.fuelTheftAt = a.fuelTheftAt;
         e.workTime         = Math.round(((e.workTime         || 0) + (a.workTime         || 0)) * 10)  / 10;
         if (a.batteryHealth != null) e.batteryHealth = a.batteryHealth;
         if (a.fuel          != null) e.fuel          = a.fuel;
@@ -495,6 +498,7 @@ export const getDashboardDataRange = async (fleetId = 1735, startDate, endDate) 
       fuelLevel:        analytics.fuel          || '-',
       fuelConsumption:  analytics.fuelConsumption  || 0,
       fuelTheft:        analytics.fuelTheft        || 0,
+      fuelTheftAt:      analytics.fuelTheftAt      || null,
       fuelRefilled:     analytics.fuelRefilled     || 0,
       engineHours:      analytics.totalEngineHours || 0,
       workTime:         analytics.workTime         || 0,

@@ -50,7 +50,7 @@ const BUCKET_MINUTES = 5;
 // Fake-spike rejection: if the fuel level recovers this fraction of the drop
 // within FAKE_SPIKE_WINDOW subsequent buckets, the drop is a sensor glitch.
 const FAKE_SPIKE_RECOVERY_RATIO = 0.5;
-const FAKE_SPIKE_WINDOW = 6; // 6 × 5-min buckets = 30-min recovery window
+const FAKE_SPIKE_WINDOW = 2; // 2 × 5-min buckets = 10-min look-around window
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // MAIN ENTRY POINT
@@ -130,7 +130,7 @@ function calculateVehicleAnalytics(vehicleId, date, sensorKeys, trackingRows) {
     fuelConsumption:    calculateFuelConsumption(smoothed),
     totalEngineHours:   calculateTotalEngineHours(trackingRows),
     fuelRefilled:       calculateFuelRefilled(smoothed),
-    fuelTheft:          calculateFuelTheft(smoothed),
+    ...(() => { const t = calculateFuelTheft(smoothed); return { fuelTheft: t.amount, fuelTheftAt: t.at }; })(),
     generatorStartTime: calculateGeneratorStartTime(trackingRows),
     generatorStopTime:  calculateGeneratorStopTime(trackingRows),
     workTime:           calculateWorkTime(trackingRows),
@@ -470,9 +470,10 @@ function calculateFuelRefilled(smoothed) {
  * @returns {number|null}
  */
 function calculateFuelTheft(smoothed) {
-  if (smoothed.length < 2) return null;
+  if (smoothed.length < 2) return { amount: null, at: null };
 
   let totalTheft = 0;
+  let firstTheftAt = null;
 
   // Collect consecutive OFF-period segments
   let segStart = null;  // index of first OFF bucket in current segment
@@ -488,21 +489,35 @@ function calculateFuelTheft(smoothed) {
     const durationMin = durationMs / (1000 * 60);
     if (durationMin < MIN_THEFT_OFF_MINUTES) return; // ignore noise window
 
-    // Sum drops within the OFF segment, skipping sensor spikes that recover
+    // Sum drops within the OFF segment, skipping sensor spikes.
+    //
+    // Rule: "if fuel comes back to where it was before the spike → not real theft"
+    //
+    // preBaseline = fuel level BEFORE the spike started (scan backward past the
+    //               elevated region — handles spikes of any duration).
+    // postFuel    = fuel level FAKE_SPIKE_WINDOW buckets AFTER the drop settles.
+    // If postFuel ≈ preBaseline (netChange < 50% of drop) → sensor spike, skip.
     for (let i = 0; i < seg.length - 1; i++) {
       const drop = seg[i].fuel - seg[i + 1].fuel;
       if (drop < FUEL_THEFT_MIN_CHANGE) continue;
 
-      // Fake-spike check: scan ahead for a recovery within FAKE_SPIKE_WINDOW buckets
-      const lookAheadEnd = Math.min(i + 1 + FAKE_SPIKE_WINDOW, seg.length - 1);
-      let maxFuelAfterDrop = seg[i + 1].fuel;
-      for (let j = i + 2; j <= lookAheadEnd; j++) {
-        if (seg[j].fuel > maxFuelAfterDrop) maxFuelAfterDrop = seg[j].fuel;
+      // Scan backward to find where fuel was before this spike began.
+      // Stop at the first bucket that is below the drop endpoint + threshold —
+      // that is the true pre-spike baseline, regardless of spike duration.
+      let preBaseline = seg[0].fuel; // fallback: segment start
+      for (let k = i - 1; k >= 0; k--) {
+        if (seg[k].fuel < seg[i].fuel - FUEL_THEFT_MIN_CHANGE) {
+          preBaseline = seg[k].fuel;
+          break;
+        }
       }
-      const recovery = maxFuelAfterDrop - seg[i + 1].fuel;
-      if (recovery >= drop * FAKE_SPIKE_RECOVERY_RATIO) continue; // sensor glitch
+
+      const postIdx   = Math.min(seg.length - 1, i + 1 + FAKE_SPIKE_WINDOW);
+      const netChange = preBaseline - seg[postIdx].fuel;
+      if (netChange < drop * FAKE_SPIKE_RECOVERY_RATIO) continue; // spike, not theft
 
       totalTheft += drop;
+      if (!firstTheftAt) firstTheftAt = seg[i].timestamp.toISOString();
     }
   };
 
@@ -520,7 +535,7 @@ function calculateFuelTheft(smoothed) {
   // Handle trailing OFF segment
   processSegment(segStart, smoothed.length - 1);
 
-  return round(totalTheft, 2);
+  return { amount: round(totalTheft, 2), at: firstTheftAt };
 }
 
 /**
@@ -662,6 +677,7 @@ function createEmptyAnalytics() {
     totalEngineHours: null,
     fuelRefilled: null,
     fuelTheft: null,
+    fuelTheftAt: null,
     generatorStartTime: null,
     generatorStopTime: null,
     workTime: null,

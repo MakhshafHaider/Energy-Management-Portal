@@ -225,7 +225,14 @@ function RefillCard({ amount, date }) {
   );
 }
 
-function TheftCard({ amount }) {
+function TheftCard({ amount, at }) {
+  const when = at
+    ? new Date(at).toLocaleString('en-PK', {
+        day: '2-digit', month: 'short', year: 'numeric',
+        hour: '2-digit', minute: '2-digit', hour12: true,
+      })
+    : null;
+
   return (
     <div className="flex items-center gap-3 p-3 rounded-xl bg-red-50 border border-red-200">
       <div className="w-8 h-8 rounded-lg bg-red-100 flex items-center justify-center flex-shrink-0">
@@ -233,7 +240,9 @@ function TheftCard({ amount }) {
       </div>
       <div>
         <p className="text-sm font-semibold text-red-700">{amount} L unaccounted loss</p>
-        <p className="text-xs text-red-400 mt-0.5">Detected while generator was OFF</p>
+        <p className="text-xs text-red-400 mt-0.5">
+          {when ? `Detected ${when} — generator was OFF` : 'Detected while generator was OFF'}
+        </p>
       </div>
     </div>
   );
@@ -405,7 +414,7 @@ function AccordionItem({ item, isOpen, onToggle }) {
                       <RefillCard amount={refilled} date={item.refillDate} />
                     )}
                     {theft > 0 && (
-                      <TheftCard amount={theft} />
+                      <TheftCard amount={theft} at={item.fuelTheftAt} />
                     )}
                   </div>
                 </div>
