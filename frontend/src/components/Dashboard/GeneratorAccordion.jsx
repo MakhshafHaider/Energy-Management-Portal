@@ -211,7 +211,8 @@ function DailyRunTimeline({ runs, startTimeFormatted, stopTimeFormatted }) {
 
 // ─── Event cards ─────────────────────────────────────────────────────────────
 
-function RefillCard({ amount, date }) {
+function RefillCard({ amount, date, filter }) {
+  const label = date || filter || 'Recorded';
   return (
     <div className="flex items-center gap-3 p-3 rounded-xl bg-blue-50 border border-blue-100">
       <div className="w-8 h-8 rounded-lg bg-blue-100 flex items-center justify-center flex-shrink-0">
@@ -219,7 +220,7 @@ function RefillCard({ amount, date }) {
       </div>
       <div>
         <p className="text-sm font-semibold text-blue-700">+{amount} L refilled</p>
-        <p className="text-xs text-blue-400 mt-0.5">{date || 'Today'}</p>
+        <p className="text-xs text-blue-400 mt-0.5">{label}</p>
       </div>
     </div>
   );
@@ -293,7 +294,7 @@ function ExpandPanel({ isOpen, children }) {
 
 // ─── Single accordion item ───────────────────────────────────────────────────
 
-function AccordionItem({ item, isOpen, onToggle }) {
+function AccordionItem({ item, isOpen, onToggle, filter }) {
   const s = getStatus(item.status);
 
   // Normalise numeric fields — the transformed shape may pass strings like "437 L"
@@ -411,7 +412,7 @@ function AccordionItem({ item, isOpen, onToggle }) {
                   <SectionLabel icon={CalendarDays} text="Events" color="text-gray-600" />
                   <div className="space-y-2">
                     {refilled > 0 && (
-                      <RefillCard amount={refilled} date={item.refillDate} />
+                      <RefillCard amount={refilled} date={item.refillDate} filter={filter} />
                     )}
                     {theft > 0 && (
                       <TheftCard amount={theft} at={item.fuelTheftAt} />
@@ -471,6 +472,7 @@ export default function GeneratorAccordion({ data = [], filter }) {
           item={item}
           isOpen={openId === (item.id ?? item.vehicleId)}
           onToggle={() => toggle(item.id ?? item.vehicleId)}
+          filter={filter}
         />
       ))}
     </div>

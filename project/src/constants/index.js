@@ -7,11 +7,15 @@
 
 // ─── Thresholds ───────────────────────────────────────────────────────────────
 
-// Minimum fuel-level rise (%) to be classified as a refill event
-const FUEL_REFILL_MIN_CHANGE = 10;
+// Minimum fuel-level rise (L) to be classified as a refill event.
+// Raised from 10 → 20 to eliminate ADC sensor upward-spike false refills.
+// Actual top-ups are typically 20 L+ (one full container or more).
+const FUEL_REFILL_MIN_CHANGE = 20;
 
-// Minimum fuel-level drop (%) to be classified as a theft / abnormal-loss event
-const FUEL_THEFT_MIN_CHANGE = 10;
+// Minimum fuel-level drop (L) to be classified as a theft / abnormal-loss event.
+// Raised from 10 → 25 to eliminate ADC sensor offset-jump false positives (10–20 L).
+// Real thefts involve physically removing ≥ 25 L; sensor noise stays below this.
+const FUEL_THEFT_MIN_CHANGE = 25;
 
 // Trips shorter than this (minutes) are ignored as noise / micro-stops
 const MIN_VALID_RUNNING_MINUTES = 2;

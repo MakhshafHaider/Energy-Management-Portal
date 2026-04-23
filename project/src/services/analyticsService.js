@@ -49,8 +49,19 @@ const BUCKET_MINUTES = 5;
 
 // Fake-spike rejection: if the fuel level recovers this fraction of the drop
 // within FAKE_SPIKE_WINDOW subsequent buckets, the drop is a sensor glitch.
+// Window is 12 hours (144 × 5 min) — ADC offset jumps on this fleet can take
+// several hours to stabilise, so we need a wide look-ahead to confirm the drop
+// is truly sustained before calling it theft.
 const FAKE_SPIKE_RECOVERY_RATIO = 0.5;
-const FAKE_SPIKE_WINDOW = 2; // 2 × 5-min buckets = 10-min look-around window
+const FAKE_SPIKE_WINDOW = 144; // 144 × 5 min = 12-hour look-around window
+
+// After the generator STOPS, the ADC takes time to settle (no vibration/heat).
+// Drops in this window are sensor settling, not theft.
+const STOP_COOLDOWN_BUCKETS = 24; // 24 × 5 min = 120 minutes
+
+// After a REFILL event inside an OFF segment, the ADC overshoots then settles.
+// Skip theft detection for this many buckets after the refill peak.
+const REFILL_COOLDOWN_BUCKETS = 24; // 24 × 5 min = 120 minutes
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // MAIN ENTRY POINT
@@ -449,7 +460,18 @@ function calculateFuelRefilled(smoothed) {
   let total = 0;
   for (let i = 0; i < smoothed.length - 1; i++) {
     const rise = smoothed[i + 1].fuel - smoothed[i].fuel;
-    if (rise >= FUEL_REFILL_MIN_CHANGE) total += rise;
+    if (rise < FUEL_REFILL_MIN_CHANGE) continue;
+
+    // Reject ADC spike recoveries: look back FAKE_SPIKE_WINDOW buckets to find
+    // the fuel level before the preceding dip. If the fuel was already near the
+    // current level back then, this rise is just recovering from a sensor spike,
+    // not a real refill. A true refill starts from a genuinely low baseline.
+    const lookback  = Math.max(0, i - FAKE_SPIKE_WINDOW);
+    const baseline  = smoothed[lookback].fuel;
+    const netLift   = smoothed[i + 1].fuel - baseline;
+    if (netLift < rise * FAKE_SPIKE_RECOVERY_RATIO) continue; // spike recovery
+
+    total += rise;
   }
   return round(total, 2);
 }
@@ -489,15 +511,24 @@ function calculateFuelTheft(smoothed) {
     const durationMin = durationMs / (1000 * 60);
     if (durationMin < MIN_THEFT_OFF_MINUTES) return; // ignore noise window
 
-    // Sum drops within the OFF segment, skipping sensor spikes.
-    //
-    // Rule: "if fuel comes back to where it was before the spike → not real theft"
-    //
-    // preBaseline = fuel level BEFORE the spike started (scan backward past the
-    //               elevated region — handles spikes of any duration).
-    // postFuel    = fuel level FAKE_SPIKE_WINDOW buckets AFTER the drop settles.
-    // If postFuel ≈ preBaseline (netChange < 50% of drop) → sensor spike, skip.
+    // cooldownUntil: bucket index below which theft detection is suppressed.
+    // Starts at STOP_COOLDOWN_BUCKETS to skip post-stop ADC settling (the ADC
+    // reads differently once vibration/heat from running stops — drops in this
+    // window are sensor stabilisation, not theft).
+    let cooldownUntil = STOP_COOLDOWN_BUCKETS;
+
     for (let i = 0; i < seg.length - 1; i++) {
+      // Detect a refill inside the OFF segment (large upward spike = fuel added).
+      // After a refill the ADC overshoots then settles back down — that settling
+      // looks like a fuel drop and must not be counted as theft.
+      const rise = seg[i + 1].fuel - seg[i].fuel;
+      if (rise >= FUEL_REFILL_MIN_CHANGE) {
+        cooldownUntil = i + 1 + REFILL_COOLDOWN_BUCKETS;
+        continue;
+      }
+
+      if (i < cooldownUntil) continue; // inside settling / post-refill window
+
       const drop = seg[i].fuel - seg[i + 1].fuel;
       if (drop < FUEL_THEFT_MIN_CHANGE) continue;
 
