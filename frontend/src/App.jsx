@@ -3,6 +3,7 @@ import Dashboard from './pages/Dashboard';
 import Analytics from './pages/Analytics';
 import Reports from './pages/Reports';
 import './App.css';
+import './tailwind.css';
 import LoginPage from './pages/Login';
 
 function App() {

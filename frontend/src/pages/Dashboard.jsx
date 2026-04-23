@@ -6,10 +6,16 @@ import KPICards from '../components/Dashboard/KPICards';
 import FuelTrendChart from '../components/Dashboard/FuelTrendChart';
 import GeneratorFuelChart from '../components/Dashboard/GeneratorFuelChart';
 import GeneratorBarChart from '../components/Dashboard/GeneratorBarChart';
-import DataTable from '../components/Dashboard/DataTable';
+import GeneratorAccordion from '../components/Dashboard/GeneratorAccordion';
 import AlertsCard from '../components/Dashboard/AlertsCard';
 import { useAuth } from '../contexts/AuthContext';
-import { getDashboardData, formatApiError, ValidationError, NotFoundError } from '../services/api';
+import { getDashboardData, getDashboardDataRange, formatApiError, ValidationError, NotFoundError } from '../services/api';
+
+// Build a YYYY-MM-DD string from a Date using the local timezone,
+// preventing the UTC-offset shift that toISOString() introduces.
+function toLocalDateStr(date) {
+  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
+}
 
 const Dashboard = ({ onNavigate }) => {
   const { fleetId } = useAuth();
@@ -47,23 +53,25 @@ const Dashboard = ({ onNavigate }) => {
         setLoading(true);
         setError(null);
         
-        // Calculate date based on filter
-        let date = new Date();
+        const today = new Date();
+        const todayStr = toLocalDateStr(today);
 
+        let data;
         if (filter === 'Today') {
-          date = new Date();
+          setSelectedDate(todayStr);
+          data = await getDashboardData(fleetId || 1735, todayStr);
         } else if (filter === 'This Week') {
-          date = new Date();
-          date.setDate(date.getDate() - 7);
+          const weekStart = new Date(today);
+          weekStart.setDate(weekStart.getDate() - 6); // last 7 days including today
+          const startStr = toLocalDateStr(weekStart);
+          setSelectedDate(todayStr);
+          data = await getDashboardDataRange(fleetId || 1735, startStr, todayStr);
         } else if (filter === 'This Month') {
-          const today = new Date();
-          date = new Date(today.getFullYear(), today.getMonth(), 1);
+          const monthStart = new Date(today.getFullYear(), today.getMonth(), 1);
+          const startStr = toLocalDateStr(monthStart);
+          setSelectedDate(todayStr);
+          data = await getDashboardDataRange(fleetId || 1735, startStr, todayStr);
         }
-        const formattedDate = date.toISOString().split('T')[0];
-        setSelectedDate(formattedDate);
-        
-        // Fetch all dashboard data
-        const data = await getDashboardData(fleetId || 1735, formattedDate);
         setDashboardData(data);
       } catch (err) {
         console.error('Failed to fetch dashboard data:', err);
@@ -319,10 +327,20 @@ const Dashboard = ({ onNavigate }) => {
                 selectedDate={selectedDate}
               />
               <div className="bottom-section">
-                <DataTable
-                  vehicles={dashboardData?.vehicles}
-                  rawVehicles={dashboardData?.raw?.vehicles}
-                />
+                <div className="table-card">
+                  <div className="card-header">
+                    <div className="card-title-section">
+                      <h3>Fleet Performance Overview</h3>
+                      <p>Real-time monitoring of all fleet vehicles</p>
+                    </div>
+                  </div>
+                  <div style={{ padding: '16px' }}>
+                    <GeneratorAccordion
+                      data={dashboardData?.vehicles}
+                      filter={filter}
+                    />
+                  </div>
+                </div>
                 <AlertsCard alerts={dashboardData?.alerts} />
               </div>
             </>

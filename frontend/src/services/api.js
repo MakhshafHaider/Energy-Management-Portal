@@ -1,6 +1,6 @@
 // API Service for Fleet Analytics Backend
 // Base URL configuration
-const API_BASE_URL = process.env.REACT_APP_API_URL || "http://192.168.20.90:3010";
+const API_BASE_URL = process.env.REACT_APP_API_URL || "http://localhost:3010";
 ;
 
 // Custom Error Classes for different validation failures
@@ -345,6 +345,9 @@ export const getDashboardData = async (fleetId = 1735, date) => {
           generatorStopTime: stopTime,
           generatorStartTimeRaw: analytics.generatorStartTime,
           generatorStopTimeRaw: analytics.generatorStopTime,
+          dailyRuns: analytics.generatorStartTime
+            ? [{ date: formattedDate, startTime: analytics.generatorStartTime, stopTime: analytics.generatorStopTime, workTime: analytics.workTime || 0 }]
+            : [],
           // Sensor info
           sensors: sensors,
           sensorCount: sensors.fuelKeys?.length || 0,
@@ -378,6 +381,157 @@ export const getDashboardData = async (fleetId = 1735, date) => {
     console.error('Dashboard data fetch error:', error);
     throw error;
   }
+};
+
+// ─── Date-range helpers ───────────────────────────────────────────────────────
+
+function toLocalDateStr(date) {
+  const y = date.getFullYear();
+  const m = String(date.getMonth() + 1).padStart(2, '0');
+  const d = String(date.getDate()).padStart(2, '0');
+  return `${y}-${m}-${d}`;
+}
+
+function buildDateRange(startDate, endDate) {
+  const dates = [];
+  const cur = new Date(startDate + 'T00:00:00');
+  const end = new Date(endDate + 'T00:00:00');
+  while (cur <= end) {
+    dates.push(toLocalDateStr(cur));
+    cur.setDate(cur.getDate() + 1);
+  }
+  return dates;
+}
+
+function aggregateVehiclesAcrossDates(dayResults) {
+  const map = new Map();
+
+  for (const result of dayResults) {
+    const dayDate = result.date;
+    for (const v of (result?.vehicles || [])) {
+      const a = v.analytics || {};
+
+      if (!map.has(v.vehicleId)) {
+        map.set(v.vehicleId, {
+          vehicleId:   v.vehicleId,
+          vehicleName: v.vehicleName,
+          analytics: {
+            batteryHealth:      a.batteryHealth      ?? null,
+            fuelConsumption:    a.fuelConsumption     ?? 0,
+            totalEngineHours:   a.totalEngineHours    ?? 0,
+            fuelRefilled:       a.fuelRefilled        ?? 0,
+            fuelTheft:          a.fuelTheft           ?? 0,
+            generatorStartTime: a.generatorStartTime  ?? null,
+            generatorStopTime:  a.generatorStopTime   ?? null,
+            workTime:           a.workTime            ?? 0,
+            fuel:               a.fuel                ?? null,
+            dailyRuns:          [],
+          },
+        });
+      } else {
+        const e = map.get(v.vehicleId).analytics;
+        e.fuelConsumption  = Math.round(((e.fuelConsumption  || 0) + (a.fuelConsumption  || 0)) * 100) / 100;
+        e.totalEngineHours = Math.round(((e.totalEngineHours || 0) + (a.totalEngineHours || 0)) * 100) / 100;
+        e.fuelRefilled     = Math.round(((e.fuelRefilled     || 0) + (a.fuelRefilled     || 0)) * 100) / 100;
+        e.fuelTheft        = Math.round(((e.fuelTheft        || 0) + (a.fuelTheft        || 0)) * 100) / 100;
+        e.workTime         = Math.round(((e.workTime         || 0) + (a.workTime         || 0)) * 10)  / 10;
+        if (a.batteryHealth != null) e.batteryHealth = a.batteryHealth;
+        if (a.fuel          != null) e.fuel          = a.fuel;
+        if (!e.generatorStartTime && a.generatorStartTime) e.generatorStartTime = a.generatorStartTime;
+        if (a.generatorStopTime)                           e.generatorStopTime  = a.generatorStopTime;
+      }
+
+      if ((a.workTime || 0) > 0 || a.generatorStartTime) {
+        map.get(v.vehicleId).analytics.dailyRuns.push({
+          date:      dayDate,
+          startTime: a.generatorStartTime,
+          stopTime:  a.generatorStopTime,
+          workTime:  a.workTime || 0,
+        });
+      }
+    }
+  }
+
+  return Array.from(map.values());
+}
+
+export const getDashboardDataRange = async (fleetId = 1735, startDate, endDate) => {
+  const validatedFleetId = validators.fleetId(fleetId);
+  const dates = buildDateRange(startDate, endDate);
+
+  const [dayResults, fleetVehicles] = await Promise.all([
+    Promise.all(
+      dates.map(d =>
+        fetchApi(`/api/fleets/${validatedFleetId}/analytics?date=${d}`).catch(() => null)
+      )
+    ),
+    getFleetVehiclesWithSensors(validatedFleetId),
+  ]);
+
+  const validDays  = dayResults.filter(Boolean);
+  const aggregated = aggregateVehiclesAcrossDates(validDays);
+
+  const sensorsMap = new Map();
+  fleetVehicles.vehicles?.forEach(v => sensorsMap.set(v.vehicleId, v.sensors));
+
+  const totalFuelConsumed = aggregated.reduce((s, v) => s + (v.analytics?.fuelConsumption || 0), 0);
+  const totalWorkTime     = aggregated.reduce((s, v) => s + (v.analytics?.workTime        || 0), 0);
+  const activeVehicles    = aggregated.filter(v => (v.analytics?.workTime || 0) > 0).length;
+  const totalFuelTheft    = aggregated.reduce((s, v) => s + (v.analytics?.fuelTheft       || 0), 0);
+
+  const transformedVehicles = aggregated.map(v => {
+    const sensors   = sensorsMap.get(v.vehicleId?.toString()) || {};
+    const analytics = v.analytics || {};
+
+    let status = 'Normal', statusClass = 'normal', iconClass = '';
+    if (analytics.fuelTheft > 0)            { status = 'Alert';   statusClass = 'alert';   iconClass = 'red';   }
+    else if ((analytics.workTime || 0) > 0) { status = 'Running'; statusClass = 'running'; iconClass = 'green'; }
+
+    return {
+      id:               v.vehicleId,
+      name:             v.vehicleName || `Generator-${v.vehicleId?.toString().slice(-3)}`,
+      type:             'Generator',
+      batteryHealth:    analytics.batteryHealth || '-',
+      fuelLevel:        analytics.fuel          || '-',
+      fuelConsumption:  analytics.fuelConsumption  || 0,
+      fuelTheft:        analytics.fuelTheft        || 0,
+      fuelRefilled:     analytics.fuelRefilled     || 0,
+      engineHours:      analytics.totalEngineHours || 0,
+      workTime:         analytics.workTime         || 0,
+      workTimeHours:    analytics.workTime ? Math.round((analytics.workTime / 60) * 10) / 10 : 0,
+      generatorStartTime:    analytics.generatorStartTime || '-',
+      generatorStopTime:     analytics.generatorStopTime  || '-',
+      generatorStartTimeRaw: analytics.generatorStartTime,
+      generatorStopTimeRaw:  analytics.generatorStopTime,
+      dailyRuns:             analytics.dailyRuns || [],
+      sensors,
+      sensorCount: sensors.fuelKeys?.length || 0,
+      status, statusClass, iconClass,
+    };
+  });
+
+  return {
+    kpi: {
+      totalFuelConsumed,
+      totalFuelTheft,
+      activeVehicles,
+      totalWorkTime: Math.round(totalWorkTime / 60 * 10) / 10,
+      totalVehicles: aggregated.length,
+      batteryHealth: aggregated.length > 0
+        ? Math.round(aggregated.reduce((s, v) => s + (v.analytics?.batteryHealth || 0), 0) / aggregated.length)
+        : 0,
+    },
+    vehicles:        transformedVehicles,
+    fuelTrend:       generateLast7DaysData(endDate, aggregated),
+    vehicleFuelData: aggregated.map(v => ({
+      name:         v.vehicleName || `Generator-${v.vehicleId?.toString().slice(-3)}`,
+      fuelConsumed: v.analytics?.fuelConsumption || 0,
+      fuelLevel:    v.analytics?.fuel            || 0,
+      workTime:     v.analytics?.workTime        || 0,
+    })),
+    alerts: generateAlerts(aggregated),
+    raw: { success: true, fleetId: validatedFleetId, date: endDate, vehicles: aggregated },
+  };
 };
 
 // Helper to generate last 7 days trend data

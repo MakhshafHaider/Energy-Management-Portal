@@ -1,6 +1,19 @@
 import React, { useState, useEffect } from 'react';
 
-const DataTable = ({ vehicles, rawVehicles }) => {
+const formatGeneratorTime = (isoString, showDate) => {
+  if (!isoString) return null;
+  const date = new Date(isoString);
+  if (showDate) {
+    return date.toLocaleString('en-US', {
+      month: 'short', day: 'numeric',
+      hour: '2-digit', minute: '2-digit',
+    });
+  }
+  return date.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' });
+};
+
+const DataTable = ({ vehicles, rawVehicles, filter: dateFilter }) => {
+  const showDate = dateFilter && dateFilter !== 'Today';
   const [filter, setFilter] = useState('All');
   const [sortColumn, setSortColumn] = useState(null);
   const [sortDirection, setSortDirection] = useState('asc');
@@ -18,13 +31,9 @@ const DataTable = ({ vehicles, rawVehicles }) => {
         const fuelLevel = analytics.fuel || 0;
         const batteryHealth = analytics.batteryHealth || 0;
 
-        // Format start/stop times
-        const startTime = analytics.generatorStartTime
-          ? new Date(analytics.generatorStartTime).toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' })
-          : null;
-        const stopTime = analytics.generatorStopTime
-          ? new Date(analytics.generatorStopTime).toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' })
-          : null;
+        // Format start/stop times — include date when viewing a week/month range
+        const startTime = formatGeneratorTime(analytics.generatorStartTime, showDate);
+        const stopTime = formatGeneratorTime(analytics.generatorStopTime, showDate);
 
         // Determine status based on fuel theft and work time
         let status = 'Normal';
@@ -63,6 +72,7 @@ const DataTable = ({ vehicles, rawVehicles }) => {
           // Time info
           generatorStartTime: startTime,
           generatorStopTime: stopTime,
+          dailyRuns: analytics.dailyRuns || [],
           runningTime: analytics.totalEngineHours || 0,
           // Status
           status: status,
@@ -91,8 +101,9 @@ const DataTable = ({ vehicles, rawVehicles }) => {
         fuelLevelRaw: v.fuelLevel || 0,
         batteryHealth: v.batteryHealth && v.batteryHealth !== '-' ? `${v.batteryHealth} mV` : '-',
         batteryHealthRaw: v.batteryHealth || 0,
-        generatorStartTime: v.generatorStartTime,
-        generatorStopTime: v.generatorStopTime,
+        generatorStartTime: formatGeneratorTime(v.generatorStartTimeRaw || v.generatorStartTime, showDate),
+        generatorStopTime: formatGeneratorTime(v.generatorStopTimeRaw || v.generatorStopTime, showDate),
+        dailyRuns: v.dailyRuns || [],
         refillDate: v.refillDate || 'No refill today',
         status: v.status || 'Normal',
         statusClass: v.statusClass || 'normal',
@@ -103,7 +114,7 @@ const DataTable = ({ vehicles, rawVehicles }) => {
       // No data available - set empty array
       setTableData([]);
     }
-  }, [vehicles, rawVehicles]);
+  }, [vehicles, rawVehicles, showDate]);
 
   const columns = [
     { key: 'name', label: 'Generator', sortable: true },
@@ -121,7 +132,7 @@ const DataTable = ({ vehicles, rawVehicles }) => {
   const handleSort = (columnKey) => {
     const isSortable = columns.find(c => c.key === columnKey)?.sortable;
     if (!isSortable) return;
-    
+
     if (sortColumn === columnKey) {
       setSortDirection(sortDirection === 'asc' ? 'desc' : 'asc');
     } else {
@@ -192,8 +203,8 @@ const DataTable = ({ vehicles, rawVehicles }) => {
           <thead>
             <tr>
               {columns.map((col) => (
-                <th 
-                  key={col.key} 
+                <th
+                  key={col.key}
                   onClick={() => handleSort(col.key)}
                   style={{ cursor: col.sortable ? 'pointer' : 'default' }}
                 >
@@ -214,11 +225,24 @@ const DataTable = ({ vehicles, rawVehicles }) => {
                     <div className="gen-details">
                       <span className="gen-name">{row.name}</span>
                       <span className="gen-id">{row.capacity}</span>
-                      {row.generatorStartTime && (
-                        <span className="gen-time">
-                          {row.generatorStartTime} - {row.generatorStopTime || 'Running'}
-                        </span>
-                      )}
+                      {showDate && row.dailyRuns && row.dailyRuns.length > 0
+                        ? row.dailyRuns.map((run, idx) => {
+                            const dateLabel = new Date(run.date + 'T00:00:00').toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+                            const start = run.startTime ? new Date(run.startTime).toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' }) : '-';
+                            const stop  = run.stopTime  ? new Date(run.stopTime).toLocaleTimeString('en-US',  { hour: '2-digit', minute: '2-digit' }) : 'Running';
+                            const dur   = run.workTime >= 60
+                              ? `${Math.round(run.workTime / 60 * 10) / 10} hrs`
+                              : `${Math.round(run.workTime)} min`;
+                            return (
+                              <span key={idx} className="gen-time">
+                                {dateLabel}: {start} – {stop} ({dur})
+                              </span>
+                            );
+                          })
+                        : row.generatorStartTime
+                          ? <span className="gen-time">{row.generatorStartTime} - {row.generatorStopTime || 'Running'}</span>
+                          : null
+                      }
                     </div>
                   </div>
                 </td>

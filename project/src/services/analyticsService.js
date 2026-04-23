@@ -65,6 +65,14 @@ function calculateVehicleAnalytics(vehicleId, date, sensorKeys, trackingRows) {
     return createEmptyAnalytics();
   }
 
+  // Drop records with timestamps in the future (pre-loaded test data / device clock drift)
+  const now = Date.now();
+  const trackingRowsFiltered = trackingRows.filter(
+    (r) => new Date(r.timestamp).getTime() <= now
+  );
+  if (trackingRowsFiltered.length === 0) return createEmptyAnalytics();
+  trackingRows = trackingRowsFiltered; // eslint-disable-line no-param-reassign
+
   if (DEBUG_MODE) {
     const first = trackingRows[0];
     const last  = trackingRows[trackingRows.length - 1];
@@ -180,17 +188,21 @@ function buildFuelIgnitionSeries(rows, calibration, fuelSensorKey, calibrationMa
     //    or use default max of 15000 when no calibration exists.
     if (fuel === null) {
       const batRaw = parseNumeric(row.battery);
-      const maxAllowed = calibration ? calibrationMaxX * 2.0 : 15000; // allow extrapolation beyond calibration
+      const maxAllowed = calibration ? calibrationMaxX * 2.0 : 6000;
       if (batRaw !== null && batRaw <= maxAllowed && batRaw >= 0) {
         fuel = batRaw;
-        needsCalibration = !!calibration; // only calibrate if we have calibration data
+        needsCalibration = true;
       }
     }
 
-    if (fuel === null) continue; // no fuel data for this row
+    if (fuel === null) continue;
 
-    if (needsCalibration && calibration) {
-      fuel = applyCalibration(fuel, calibration);
+    if (needsCalibration) {
+      if (calibration) {
+        fuel = applyCalibration(fuel, calibration);
+      } else {
+        continue; // raw ADC without a calibration curve cannot be converted to litres
+      }
     }
 
     if (Number.isNaN(fuel)) continue;
