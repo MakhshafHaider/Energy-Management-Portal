@@ -47,6 +47,11 @@ const MIN_THEFT_OFF_MINUTES = 15;
 // Smoothing bucket size for noise reduction
 const BUCKET_MINUTES = 5;
 
+// Fake-spike rejection: if the fuel level recovers this fraction of the drop
+// within FAKE_SPIKE_WINDOW subsequent buckets, the drop is a sensor glitch.
+const FAKE_SPIKE_RECOVERY_RATIO = 0.5;
+const FAKE_SPIKE_WINDOW = 6; // 6 × 5-min buckets = 30-min recovery window
+
 // ═══════════════════════════════════════════════════════════════════════════════
 // MAIN ENTRY POINT
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -483,10 +488,21 @@ function calculateFuelTheft(smoothed) {
     const durationMin = durationMs / (1000 * 60);
     if (durationMin < MIN_THEFT_OFF_MINUTES) return; // ignore noise window
 
-    // Sum any drops within the OFF segment
+    // Sum drops within the OFF segment, skipping sensor spikes that recover
     for (let i = 0; i < seg.length - 1; i++) {
       const drop = seg[i].fuel - seg[i + 1].fuel;
-      if (drop >= FUEL_THEFT_MIN_CHANGE) totalTheft += drop;
+      if (drop < FUEL_THEFT_MIN_CHANGE) continue;
+
+      // Fake-spike check: scan ahead for a recovery within FAKE_SPIKE_WINDOW buckets
+      const lookAheadEnd = Math.min(i + 1 + FAKE_SPIKE_WINDOW, seg.length - 1);
+      let maxFuelAfterDrop = seg[i + 1].fuel;
+      for (let j = i + 2; j <= lookAheadEnd; j++) {
+        if (seg[j].fuel > maxFuelAfterDrop) maxFuelAfterDrop = seg[j].fuel;
+      }
+      const recovery = maxFuelAfterDrop - seg[i + 1].fuel;
+      if (recovery >= drop * FAKE_SPIKE_RECOVERY_RATIO) continue; // sensor glitch
+
+      totalTheft += drop;
     }
   };
 
