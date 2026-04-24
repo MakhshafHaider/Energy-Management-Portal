@@ -54,7 +54,7 @@ export const AuthProvider = ({ children }) => {
     setIsLoading(true);
     try {
       // Replace with your actual API endpoint
-      const response = await fetch('http://192.168.20.90:3010/api/auth/login', {
+      const response = await fetch('http://localhost:3010/api/auth/login', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',

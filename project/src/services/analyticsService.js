@@ -25,43 +25,32 @@
  * Theft is only meaningful when the generator is OFF (ignition = 0).
  * ADC sensor noise causes spurious spikes at the moment of ignition
  * transition (0-minute "OFF" windows that show 40-50 L drops) — these are
- * filtered out by requiring an OFF segment ≥ MIN_THEFT_OFF_MINUTES.
+ * filtered out by requiring the drop to occur during ignition=0 state.
  *
  * ── Fuel consumption rule ───────────────────────────────────────────────────
  *
- * True consumption = fuel burned while ignition is ON.
- * Net consumption = first fuel reading – last fuel reading (kept as fallback).
+ * True consumption uses mass-balance formula:
+ *   consumed = max(0, (firstFuel - lastFuel) + totalRefueled)
  */
 
 const {
-  FUEL_REFILL_MIN_CHANGE,
-  FUEL_THEFT_MIN_CHANGE,
   MIN_VALID_RUNNING_MINUTES,
   DEBUG_MODE,
 } = require('../constants');
 
-// Minimum duration (minutes) for an ignition-OFF segment to be considered a
-// real "generator off" window — filters out ADC noise at transition moments.
-const MIN_THEFT_OFF_MINUTES = 15;
+// ─── Multi-layer fuel detection constants ────────────────────────────────────
 
-// Smoothing bucket size for noise reduction
-const BUCKET_MINUTES = 5;
-
-// Fake-spike rejection: if the fuel level recovers this fraction of the drop
-// within FAKE_SPIKE_WINDOW subsequent buckets, the drop is a sensor glitch.
-// Window is 12 hours (144 × 5 min) — ADC offset jumps on this fleet can take
-// several hours to stabilise, so we need a wide look-ahead to confirm the drop
-// is truly sustained before calling it theft.
-const FAKE_SPIKE_RECOVERY_RATIO = 0.5;
-const FAKE_SPIKE_WINDOW = 144; // 144 × 5 min = 12-hour look-around window
-
-// After the generator STOPS, the ADC takes time to settle (no vibration/heat).
-// Drops in this window are sensor settling, not theft.
-const STOP_COOLDOWN_BUCKETS = 24; // 24 × 5 min = 120 minutes
-
-// After a REFILL event inside an OFF segment, the ADC overshoots then settles.
-// Skip theft detection for this many buckets after the refill peak.
-const REFILL_COOLDOWN_BUCKETS = 24; // 24 × 5 min = 120 minutes
+const FUEL_MEDIAN_SAMPLES        = 5;    // causal backward-looking window
+const DROP_ALERT_THRESHOLD       = 8;    // L — candidate theft/loss
+const RISE_THRESHOLD             = 8;    // L — candidate refuel
+const NOISE_THRESHOLD            = 0.5;  // L — ignore changes below this
+const SPIKE_WINDOW_MINUTES       = 7;    // min — half-width for ±7 min window
+const POST_DROP_VERIFY_EPS       = 1.5;  // L — recovery tolerance post-drop
+const POST_REFUEL_VERIFY_EPS     = 8.0;  // L — fallback tolerance post-refuel
+const RISE_RECOVERY_EPS          = 2.0;  // L — tolerance in isRecoveryRise
+const RISE_RECOVERY_LOOKBACK_MIN = 7;    // min — lookback for isRecoveryRise
+const REFUEL_CONSOLIDATION_MIN   = 15;   // min — forward scan for refuel peak
+const MAX_SINGLE_READING_DROP    = 2.0;  // L — sensor jump flag
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // MAIN ENTRY POINT
@@ -74,9 +63,10 @@ const REFILL_COOLDOWN_BUCKETS = 24; // 24 × 5 min = 120 minutes
  * @param {string} date - YYYY-MM-DD
  * @param {Object} sensorKeys - from sensorMapper.resolveSensorKeys()
  * @param {Array}  trackingRows - ordered ASC by timestamp
+ * @param {Array}  [warmupRows=[]] - rows from warmup period before trackingRows
  * @returns {Object}
  */
-function calculateVehicleAnalytics(vehicleId, date, sensorKeys, trackingRows) {
+function calculateVehicleAnalytics(vehicleId, date, sensorKeys, trackingRows, warmupRows = []) {
   if (!trackingRows || !Array.isArray(trackingRows) || trackingRows.length === 0) {
     return createEmptyAnalytics();
   }
@@ -130,22 +120,37 @@ function calculateVehicleAnalytics(vehicleId, date, sensorKeys, trackingRows) {
     }
   }
 
-  // Build a single merged series once — reused by all fuel functions
-  const rawFuelIgnSeries = buildFuelIgnitionSeries(
-    trackingRows, fuelCalibration, fuelSensorKey, calibrationMaxX
-  );
-  const smoothed = smoothFuelIgnitionSeries(rawFuelIgnSeries);
+  // Build merged series over all rows (warmup + tracking)
+  const allRows = [...warmupRows, ...trackingRows];
+  const rawSeries  = buildFuelIgnitionSeries(allRows, fuelCalibration, fuelSensorKey, calibrationMaxX);
+  const smoothed   = smoothFuelIgnitionSeries(rawSeries);
+
+  // dayStart is used to exclude warmup-period events from the results
+  const dayStart = warmupRows.length > 0 ? new Date(trackingRows[0].timestamp) : null;
+
+  // Detect theft drops and refuel events using the multi-layer algorithm
+  const { theftDrops, refuels } = detectFuelEvents(rawSeries, smoothed, dayStart);
+
+  // Narrow down to the day's smoothed series for consumption calculation
+  const daySmoothed = dayStart
+    ? smoothed.filter((pt) => pt.timestamp >= dayStart)
+    : smoothed;
+
+  const totalRefueled = refuels.reduce((s, r) => s + r.added, 0);
+  const totalTheft    = theftDrops.reduce((s, d) => s + d.consumed, 0);
+  const fuelTheftAt   = theftDrops.length > 0 ? theftDrops[0].at : null;
 
   return {
     batteryHealth:      calculateBatteryHealth(trackingRows),
-    fuelConsumption:    calculateFuelConsumption(smoothed),
+    fuelConsumption:    calculateFuelConsumption(daySmoothed, totalRefueled),
     totalEngineHours:   calculateTotalEngineHours(trackingRows),
-    fuelRefilled:       calculateFuelRefilled(smoothed),
-    ...(() => { const t = calculateFuelTheft(smoothed); return { fuelTheft: t.amount, fuelTheftAt: t.at }; })(),
+    fuelRefilled:       round(totalRefueled, 2) || 0,
+    fuelTheft:          round(totalTheft, 2) || 0,
+    fuelTheftAt,
     generatorStartTime: calculateGeneratorStartTime(trackingRows),
     generatorStopTime:  calculateGeneratorStopTime(trackingRows),
     workTime:           calculateWorkTime(trackingRows),
-    fuel:               getFinalFuelValue(rawFuelIgnSeries),
+    fuel:               getFinalFuelValue(rawSeries),
   };
 }
 
@@ -234,53 +239,470 @@ function buildFuelIgnitionSeries(rows, calibration, fuelSensorKey, calibrationMa
 }
 
 /**
- * Smooth the raw fuel+ignition series into BUCKET_MINUTES-wide time buckets.
+ * Layer 1 — Causal N-sample median filter.
  *
- * Per bucket:
- *   • fuel    = median of all fuel readings in the bucket
- *   • ignition = majority vote (more ON rows → 1, more OFF → 0, else null)
- *   • timestamp = start of the bucket
+ * For each point i, takes the median of series[max(0,i-N+1)...i] (backward-
+ * looking window of up to N samples). Preserves real step changes while
+ * suppressing single-sample ADC spikes. Ignition is decided by majority vote
+ * of the same window.
  *
- * Why: The Battery ADC has noise spikes where fuel appears to drop 50 L in
- * a single second, then recover.  5-min median bucketing eliminates these.
- * ADC transition glitches (0-min OFF windows) are also absorbed into the
- * surrounding ON bucket's majority vote.
- *
- * @param {Array<{timestamp,fuel,ignition}>} series
- * @param {number} bucketMinutes
+ * @param {Array<{timestamp,fuel,ignition}>} series  Raw fuel+ignition series
+ * @param {number} [samples=FUEL_MEDIAN_SAMPLES]
  * @returns {Array<{timestamp,fuel,ignition}>}
  */
-function smoothFuelIgnitionSeries(series, bucketMinutes = BUCKET_MINUTES) {
+function smoothFuelIgnitionSeries(series, samples = FUEL_MEDIAN_SAMPLES) {
   if (series.length === 0) return [];
 
-  const bucketMs = bucketMinutes * 60 * 1000;
-  const startTs  = series[0].timestamp.getTime();
-  const buckets  = new Map(); // key → {fuels:[], onCount:0, offCount:0}
+  return series.map((pt, i) => {
+    const win    = series.slice(Math.max(0, i - samples + 1), i + 1);
+    const sorted = win.map((p) => p.fuel).sort((a, b) => a - b);
+    const median = sorted[Math.floor(sorted.length / 2)];
+    const onCnt  = win.filter((p) => p.ignition === 1).length;
+    const offCnt = win.filter((p) => p.ignition === 0).length;
+    return {
+      timestamp: pt.timestamp,
+      fuel:      median,
+      ignition:  onCnt > offCnt ? 1 : offCnt > onCnt ? 0 : pt.ignition,
+    };
+  });
+}
 
-  for (const pt of series) {
-    const key = Math.floor((pt.timestamp.getTime() - startTs) / bucketMs);
-    if (!buckets.has(key)) buckets.set(key, { fuels: [], onCount: 0, offCount: 0 });
-    const b = buckets.get(key);
-    b.fuels.push(pt.fuel);
-    if (pt.ignition === 1) b.onCount++;
-    else if (pt.ignition === 0) b.offCount++;
+// ═══════════════════════════════════════════════════════════════════════════════
+// LAYER 3a — isFakeSpike (drop check)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/**
+ * Returns true if a large drop at `dropTime` is a sensor glitch rather than
+ * real theft/loss. Uses raw (unfiltered) readings in the ±SPIKE_WINDOW_MINUTES
+ * window around the drop timestamp. Speed checks are omitted — generators are
+ * stationary.
+ *
+ * @param {Array<{timestamp:Date,fuel:number}>} raw
+ * @param {Date} dropTime
+ * @returns {boolean}
+ */
+function isFakeSpike(raw, dropTime) {
+  const wMs = SPIKE_WINDOW_MINUTES * 60 * 1000;
+  const win = raw.filter(
+    (pt) =>
+      pt.timestamp >= new Date(dropTime.getTime() - wMs) &&
+      pt.timestamp <= new Date(dropTime.getTime() + wMs)
+  );
+  if (win.length < 2) return false;
+
+  const startFuel = win[0].fuel;
+  const finalFuel = win[win.length - 1].fuel;
+
+  // Check 2: full recovery → fake
+  if (finalFuel >= startFuel) return true;
+
+  // Check 3: near recovery → fake
+  if (Math.abs(finalFuel - startFuel) <= DROP_ALERT_THRESHOLD) return true;
+
+  // Check 4: sub-drop scan
+  let foundLarge = false;
+  for (let j = 0; j < win.length - 1; j++) {
+    const sub = win[j].fuel - win[j + 1].fuel;
+    if (sub >= DROP_ALERT_THRESHOLD) {
+      foundLarge = true;
+      // Directional check: "stayed low" means fuel remained BELOW the pre-drop
+      // level, not merely "far from" it. Using abs() would incorrectly treat
+      // readings that recovered ABOVE the baseline as "staying low."
+      const stayedLow = win
+        .slice(j + 1)
+        .every((r) => r.fuel < win[j].fuel - DROP_ALERT_THRESHOLD);
+      if (stayedLow) return false; // sustained → real
+    }
+  }
+  // All large sub-drops recovered → fake; no large sub-drops → real (gradual)
+  return foundLarge;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// LAYER 3b — isFakeRise (refuel check)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/**
+ * Returns true if a large rise at `riseTime` is a sensor glitch rather than
+ * a real refuel. Uses raw readings in ±SPIKE_WINDOW_MINUTES around riseTime.
+ * Speed checks omitted (stationary generators).
+ *
+ * @param {Array<{timestamp:Date,fuel:number}>} raw
+ * @param {Date} riseTime
+ * @param {number} baseline  Fuel level before the rise
+ * @param {number} peakFuel  Peak fuel level after consolidation
+ * @returns {boolean}
+ */
+function isFakeRise(raw, riseTime, baseline, peakFuel) {
+  const wMs = SPIKE_WINDOW_MINUTES * 60 * 1000;
+  const win = raw.filter(
+    (pt) =>
+      pt.timestamp >= new Date(riseTime.getTime() - wMs) &&
+      pt.timestamp <= new Date(riseTime.getTime() + wMs)
+  );
+  if (win.length < 2) return false;
+
+  const startFuel = win[0].fuel;
+  const finalFuel = win[win.length - 1].fuel;
+
+  // Check 3: fell back to or below baseline → fake
+  if (finalFuel <= startFuel) return true;
+
+  // Check 4: did not sustain enough gain → fake
+  if (Math.abs(finalFuel - startFuel) <= RISE_THRESHOLD) return true;
+
+  // Check 5: sub-rise scan
+  for (let j = 0; j < win.length - 1; j++) {
+    const sub = win[j + 1].fuel - win[j].fuel;
+    if (sub >= RISE_THRESHOLD) {
+      const stayedHigh = win
+        .slice(j + 1)
+        .every((r) => Math.abs(r.fuel - win[j].fuel) > RISE_THRESHOLD);
+      // stayedHigh → real; fell back → fake
+      return !stayedHigh;
+    }
+  }
+  return false;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// LAYER 3c — isRecoveryRise
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/**
+ * Returns true when a "rise" is actually the sensor recovering from a prior
+ * temporary dip — i.e., fuel was already near peak before the detected rise.
+ *
+ * Guard: skipped when a confirmed theft drop occurred within the last 60 min
+ * (that would be a real refuel after real theft, not a recovery).
+ *
+ * @param {Array<{timestamp:Date,fuel:number}>} raw
+ * @param {Date}        riseTime
+ * @param {number}      baseline
+ * @param {number}      peakFuel
+ * @param {Date|null}   lastConfirmedDropTime
+ * @returns {boolean}
+ */
+function isRecoveryRise(raw, riseTime, baseline, peakFuel, lastConfirmedDropTime) {
+  // Guard: skip if a confirmed drop was within 60 min of this rise
+  if (lastConfirmedDropTime) {
+    const diffMs = riseTime.getTime() - lastConfirmedDropTime.getTime();
+    if (diffMs <= 60 * 60 * 1000) return false;
   }
 
-  const result = [];
-  for (const [key, b] of [...buckets.entries()].sort((a, b) => a[0] - b[0])) {
-    const sorted  = [...b.fuels].sort((a, c) => a - c);
-    const median  = sorted[Math.floor(sorted.length / 2)];
-    const ignition = b.onCount > b.offCount ? 1
-                   : b.offCount > b.onCount ? 0
-                   : null;
-    result.push({
-      timestamp: new Date(startTs + key * bucketMs),
-      fuel: median,
-      ignition,
-    });
+  const lookbackMs = RISE_RECOVERY_LOOKBACK_MIN * 60 * 1000;
+  const win = raw.filter(
+    (pt) =>
+      pt.timestamp >= new Date(riseTime.getTime() - lookbackMs) &&
+      pt.timestamp < riseTime
+  );
+  if (win.length === 0) return false;
+
+  const fuels  = win.map((p) => p.fuel);
+  const preMax = Math.max(...fuels);
+  const preMin = Math.min(...fuels);
+
+  return (
+    preMax >= peakFuel - RISE_RECOVERY_EPS &&
+    preMin <= baseline + RISE_RECOVERY_EPS &&
+    preMax - preMin >= RISE_THRESHOLD
+  );
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// LAYER 3d — isStationaryDropRecovery
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/**
+ * Returns true when the rise is merely a recovery from a prior sensor glitch
+ * that occurred while the generator was parked. Simplified: no speed checks
+ * (generators are always stationary).
+ *
+ * Scans backwards 90 min from riseTime. If a consecutive pair shows a drop
+ * ≥ DROP_ALERT_THRESHOLD while the "before" reading was at near-peak level,
+ * the current rise is just that glitch recovering.
+ *
+ * @param {Array<{timestamp:Date,fuel:number}>} raw
+ * @param {Date}   riseTime
+ * @param {number} peakFuel
+ * @returns {boolean}
+ */
+function isStationaryDropRecovery(raw, riseTime, peakFuel) {
+  const lookbackMs = 90 * 60 * 1000;
+  const win = raw.filter(
+    (pt) =>
+      pt.timestamp >= new Date(riseTime.getTime() - lookbackMs) &&
+      pt.timestamp < riseTime
+  );
+
+  for (let j = 0; j < win.length - 1; j++) {
+    const drop = win[j].fuel - win[j + 1].fuel;
+    if (
+      drop >= DROP_ALERT_THRESHOLD &&
+      win[j].fuel >= peakFuel - RISE_RECOVERY_EPS
+    ) {
+      return true; // prior glitch drop while near peak → this rise is recovery
+    }
+  }
+  return false;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// LAYER 4a — isDropConfirmedAfterDelay
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/**
+ * Mirrors the Python monitoring script's ~80-second verify delay. Checks
+ * whether the fuel is still low in the first reading within 10 min after the
+ * drop. Speed checks omitted (stationary generators).
+ *
+ * @param {Array<{timestamp:Date,fuel:number}>} filtered
+ * @param {Date}   dropTime
+ * @param {number} baseline  Fuel level just before the drop
+ * @returns {boolean}  true = drop confirmed (still low)
+ */
+function isDropConfirmedAfterDelay(filtered, dropTime, baseline) {
+  const verifyRow = filtered.find(
+    (pt) =>
+      pt.timestamp > dropTime &&
+      pt.timestamp <= new Date(dropTime.getTime() + 10 * 60 * 1000)
+  );
+
+  if (!verifyRow) return true; // data gap → assume still dropped (conservative)
+
+  const stillDropped =
+    verifyRow.fuel < baseline &&
+    (baseline - verifyRow.fuel) >= DROP_ALERT_THRESHOLD;
+
+  return stillDropped;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// LAYER 4b — isPostDropRecovery
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/**
+ * Checks the (+7 min, +14 min] window after the drop. If fuel recovered
+ * within POST_DROP_VERIFY_EPS of baseline, this was a slow-recovering glitch.
+ *
+ * @param {Array<{timestamp:Date,fuel:number}>} filtered
+ * @param {Date}   dropTime
+ * @param {number} baseline
+ * @returns {boolean}  true = recovered (fake)
+ */
+function isPostDropRecovery(filtered, dropTime, baseline) {
+  const lo = new Date(dropTime.getTime() + SPIKE_WINDOW_MINUTES * 60 * 1000);
+  const hi = new Date(dropTime.getTime() + 2 * SPIKE_WINDOW_MINUTES * 60 * 1000);
+  const post = filtered.filter((pt) => pt.timestamp > lo && pt.timestamp <= hi);
+
+  if (post.length === 0) return false; // no data → conservative (assume real)
+
+  return post[post.length - 1].fuel >= baseline - POST_DROP_VERIFY_EPS;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// REFUEL CONSOLIDATION
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/**
+ * After a detected rise, scan forward up to REFUEL_CONSOLIDATION_MIN minutes
+ * to find the true peak fuel level (a physical refuel may take several steps).
+ *
+ * @param {Array<{timestamp:Date,fuel:number}>} filtered
+ * @param {number} riseIdx   Index in `filtered` where the rise was detected
+ * @param {number} baseline  Fuel level just before the rise
+ * @returns {{ peakFuel:number, consolidationEnd:Date, falledBack:boolean }}
+ */
+function refuelConsolidation(filtered, riseIdx, baseline) {
+  const riseTime     = filtered[riseIdx].timestamp;
+  const consolidEnd  = new Date(riseTime.getTime() + REFUEL_CONSOLIDATION_MIN * 60 * 1000);
+
+  let peakFuel         = filtered[riseIdx].fuel;
+  let consolidationEnd = filtered[riseIdx].timestamp;
+  let falledBack       = false;
+
+  for (let k = riseIdx + 1; k < filtered.length; k++) {
+    const pt = filtered[k];
+    if (pt.timestamp > consolidEnd) break;
+
+    consolidationEnd = pt.timestamp;
+
+    if (pt.fuel > peakFuel) {
+      peakFuel = pt.fuel; // still rising → update peak
+    } else if (
+      pt.fuel < baseline + RISE_THRESHOLD &&
+      peakFuel - pt.fuel > RISE_THRESHOLD
+    ) {
+      falledBack = true; // significant drop from peak → stop
+      break;
+    }
   }
 
-  return result;
+  return { peakFuel, consolidationEnd, falledBack };
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// LAYER 4c — isPostRefuelFallback
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/**
+ * After the refuel consolidation window, checks the (+7 min, +14 min] window.
+ * If fuel fell significantly from peak → likely a fake spike. A 75% retention
+ * override accepts the refuel even if fuel settled somewhat below peak.
+ *
+ * @param {Array<{timestamp:Date,fuel:number}>} filtered
+ * @param {Date}   consolidationEnd  Last timestamp of the consolidation scan
+ * @param {number} peakFuel
+ * @param {number} baseline
+ * @returns {boolean}  true = fake (fell back), false = real refuel
+ */
+function isPostRefuelFallback(filtered, consolidationEnd, peakFuel, baseline) {
+  const lo = new Date(consolidationEnd.getTime() + SPIKE_WINDOW_MINUTES * 60 * 1000);
+  const hi = new Date(consolidationEnd.getTime() + 2 * SPIKE_WINDOW_MINUTES * 60 * 1000);
+  let post = filtered.filter((pt) => pt.timestamp > lo && pt.timestamp <= hi);
+
+  // Extend window if no readings found
+  if (post.length === 0) {
+    const hiExt = new Date(consolidationEnd.getTime() + 30 * 60 * 1000);
+    post = filtered.filter((pt) => pt.timestamp > lo && pt.timestamp <= hiExt);
+  }
+
+  if (post.length === 0) return false; // no data → conservative (assume real)
+
+  const lastPostFuel = post[post.length - 1].fuel;
+
+  if (lastPostFuel >= peakFuel - POST_REFUEL_VERIFY_EPS) {
+    return false; // held near peak → real refuel
+  }
+
+  // 75% retention override: if settled fuel is still well above baseline,
+  // accept it as a real refuel with minor post-fill settling / consumption.
+  const retainThreshold = baseline + 0.75 * (peakFuel - baseline);
+  if (lastPostFuel > retainThreshold) {
+    return false; // override — real refuel with minor settling
+  }
+
+  return true; // fell back → fake
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// MAIN EVENT DETECTION — detectFuelEvents
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/**
+ * Walk the filtered (smoothed) series and apply all detection layers to
+ * produce confirmed theft-drop events and refuel events.
+ *
+ * @param {Array<{timestamp:Date,fuel:number,ignition:0|1|null}>} raw       Raw series
+ * @param {Array<{timestamp:Date,fuel:number,ignition:0|1|null}>} filtered  Smoothed series
+ * @param {Date|null} dayStart  Exclude events before this timestamp (warmup exclusion)
+ * @returns {{ theftDrops: Array, refuels: Array }}
+ */
+function detectFuelEvents(raw, filtered, dayStart) {
+  const theftDrops = [];
+  const refuels    = [];
+  let lastConfirmedDropTime = null;
+
+  for (let i = 0; i < filtered.length - 1; i++) {
+    const delta = filtered[i + 1].fuel - filtered[i].fuel;
+
+    // Ignore noise
+    if (Math.abs(delta) < NOISE_THRESHOLD) continue;
+
+    // ── LARGE DROP ─────────────────────────────────────────────────────────
+    if (delta <= -DROP_ALERT_THRESHOLD) {
+      // Only count theft during OFF periods (generator off = ignition 0).
+      //
+      // Two-source ignition guard:
+      //  - raw ignition can be transiently 0 during an ON run (ADC/device
+      //    glitch), so the smoothed majority-vote catches those cases.
+      //  - smoothed ignition lags at startup: the 5-sample window may still
+      //    show 0 a few seconds into generator ON, so raw catches that.
+      //
+      // Require BOTH to agree the generator is OFF before proceeding.
+      // raw[] and filtered[] are index-aligned (median filter maps 1-to-1).
+      const rawIgn      = raw[i + 1] !== undefined ? raw[i + 1].ignition : null;
+      const smoothedIgn = filtered[i + 1].ignition;
+      if (rawIgn !== 0 || smoothedIgn !== 0) continue;
+
+      // Skip warmup period
+      if (dayStart && filtered[i + 1].timestamp < dayStart) continue;
+
+      const baseline = filtered[i].fuel;
+      const dropTime = filtered[i + 1].timestamp;
+
+      // Forward scan within +SPIKE_WINDOW_MINUTES to find lowest confirmed fuel
+      const scanEnd = new Date(dropTime.getTime() + SPIKE_WINDOW_MINUTES * 60 * 1000);
+      let verifiedFuel = filtered[i + 1].fuel;
+      for (let k = i + 2; k < filtered.length; k++) {
+        if (filtered[k].timestamp > scanEnd) break;
+        // Stop early if fuel recovered above (baseline - DROP_ALERT_THRESHOLD)
+        if (filtered[k].fuel > baseline - DROP_ALERT_THRESHOLD) break;
+        // Stop early if a refuel step is detected
+        if (filtered[k].fuel - filtered[k - 1].fuel >= RISE_THRESHOLD) break;
+        if (filtered[k].fuel < verifiedFuel) verifiedFuel = filtered[k].fuel;
+      }
+
+      const totalConsumed = baseline - verifiedFuel;
+      if (totalConsumed < DROP_ALERT_THRESHOLD) continue;
+
+      // Layer 4a — still low after delay?
+      if (!isDropConfirmedAfterDelay(filtered, dropTime, baseline)) continue;
+
+      // Layer 3a — sensor glitch check
+      if (isFakeSpike(raw, dropTime)) continue;
+
+      // Layer 4b — slow-recovering glitch check
+      if (isPostDropRecovery(filtered, dropTime, baseline)) continue;
+
+      theftDrops.push({
+        at:       dropTime.toISOString(),
+        before:   round(baseline, 2),
+        after:    round(verifiedFuel, 2),
+        consumed: round(totalConsumed, 2),
+      });
+      lastConfirmedDropTime = dropTime;
+    }
+
+    // ── LARGE RISE ──────────────────────────────────────────────────────────
+    else if (delta >= RISE_THRESHOLD) {
+      // Skip warmup period
+      if (dayStart && filtered[i + 1].timestamp < dayStart) continue;
+
+      const baseline = filtered[i].fuel;
+      const riseTime = filtered[i + 1].timestamp;
+
+      // Refuel consolidation — find true peak
+      const { peakFuel, consolidationEnd, falledBack } =
+        refuelConsolidation(filtered, i + 1, baseline);
+
+      if (falledBack) continue; // peak collapsed in consolidation window → fake
+
+      const totalAdded = peakFuel - baseline;
+      if (totalAdded < RISE_THRESHOLD) continue;
+
+      // Layer 3b — isFakeRise
+      if (isFakeRise(raw, riseTime, baseline, peakFuel)) continue;
+
+      // Layer 3c — isRecoveryRise
+      if (isRecoveryRise(raw, riseTime, baseline, peakFuel, lastConfirmedDropTime)) continue;
+
+      // Layer 3d — isStationaryDropRecovery
+      if (isStationaryDropRecovery(raw, riseTime, peakFuel)) continue;
+
+      // Layer 4c — isPostRefuelFallback
+      if (isPostRefuelFallback(filtered, consolidationEnd, peakFuel, baseline)) continue;
+
+      refuels.push({
+        at:    riseTime.toISOString(),
+        before: round(baseline, 2),
+        after:  round(peakFuel, 2),
+        added:  round(totalAdded, 2),
+      });
+    }
+  }
+
+  return { theftDrops, refuels };
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -402,35 +824,19 @@ function calculateBatteryHealth(rows) {
 }
 
 /**
- * 2. FUEL CONSUMPTION
+ * 2. FUEL CONSUMPTION — mass-balance formula.
  *
- * Total fuel burned while the generator was ON (ignition = 1).
- * Uses the smoothed series — sums all drops that occur in ON-period buckets.
- * Falls back to net (first − last) if no ignition data.
+ *   consumed = max(0, (firstFuel - lastFuel) + totalRefueled)
  *
- * @param {Array<{timestamp,fuel,ignition}>} smoothed
+ * @param {Array<{timestamp,fuel,ignition}>} dayFiltered  Day's smoothed series
+ * @param {number} totalRefueled  Sum of all confirmed refuel events for the day
  * @returns {number|null}
  */
-function calculateFuelConsumption(smoothed) {
-  if (smoothed.length < 2) return smoothed.length === 0 ? null : 0;
-
-  const hasIgnitionData = smoothed.some((p) => p.ignition !== null);
-
-  if (hasIgnitionData) {
-    // Sum drops that happen while ignition is ON
-    let totalConsumed = 0;
-    for (let i = 0; i < smoothed.length - 1; i++) {
-      if (smoothed[i].ignition === 1 && smoothed[i + 1].ignition === 1) {
-        const drop = smoothed[i].fuel - smoothed[i + 1].fuel;
-        if (drop > 0) totalConsumed += drop;
-      }
-    }
-    return round(totalConsumed, 2);
-  }
-
-  // No ignition data — fall back to net consumption
-  const consumption = smoothed[0].fuel - smoothed[smoothed.length - 1].fuel;
-  return round(Math.max(0, consumption), 2);
+function calculateFuelConsumption(dayFiltered, totalRefueled) {
+  if (!dayFiltered || dayFiltered.length === 0) return null;
+  const firstFuel = dayFiltered[0].fuel;
+  const lastFuel  = dayFiltered[dayFiltered.length - 1].fuel;
+  return round(Math.max(0, (firstFuel - lastFuel) + (totalRefueled || 0)), 2);
 }
 
 /**
@@ -446,131 +852,7 @@ function calculateTotalEngineHours(rows) {
 }
 
 /**
- * 4. FUEL REFILLED
- *
- * Sum of upward fuel jumps ≥ FUEL_REFILL_MIN_CHANGE in the smoothed series.
- * A refill can happen at any ignition state.
- *
- * @param {Array<{timestamp,fuel,ignition}>} smoothed
- * @returns {number|null}
- */
-function calculateFuelRefilled(smoothed) {
-  if (smoothed.length < 2) return null;
-
-  let total = 0;
-  for (let i = 0; i < smoothed.length - 1; i++) {
-    const rise = smoothed[i + 1].fuel - smoothed[i].fuel;
-    if (rise < FUEL_REFILL_MIN_CHANGE) continue;
-
-    // Reject ADC spike recoveries: look back FAKE_SPIKE_WINDOW buckets to find
-    // the fuel level before the preceding dip. If the fuel was already near the
-    // current level back then, this rise is just recovering from a sensor spike,
-    // not a real refill. A true refill starts from a genuinely low baseline.
-    const lookback  = Math.max(0, i - FAKE_SPIKE_WINDOW);
-    const baseline  = smoothed[lookback].fuel;
-    const netLift   = smoothed[i + 1].fuel - baseline;
-    if (netLift < rise * FAKE_SPIKE_RECOVERY_RATIO) continue; // spike recovery
-
-    total += rise;
-  }
-  return round(total, 2);
-}
-
-/**
- * 5. FUEL THEFT
- *
- * Detects fuel stolen while the generator was OFF.
- *
- * Algorithm:
- *  1. Identify consecutive OFF buckets in the smoothed series.
- *  2. Only process OFF segments lasting ≥ MIN_THEFT_OFF_MINUTES.
- *     This eliminates ADC noise glitches at ignition transitions
- *     (the 0-minute "OFF" spikes we observed with 40–50 L false drops).
- *  3. Any drop ≥ FUEL_THEFT_MIN_CHANGE across consecutive OFF buckets → theft.
- *
- * @param {Array<{timestamp,fuel,ignition}>} smoothed
- * @returns {number|null}
- */
-function calculateFuelTheft(smoothed) {
-  if (smoothed.length < 2) return { amount: null, at: null };
-
-  let totalTheft = 0;
-  let firstTheftAt = null;
-
-  // Collect consecutive OFF-period segments
-  let segStart = null;  // index of first OFF bucket in current segment
-
-  const processSegment = (startIdx, endIdx) => {
-    if (startIdx === null || endIdx <= startIdx) return;
-
-    const seg = smoothed.slice(startIdx, endIdx + 1);
-    if (seg.length < 2) return;
-
-    // Check duration of this OFF segment
-    const durationMs = seg[seg.length - 1].timestamp - seg[0].timestamp;
-    const durationMin = durationMs / (1000 * 60);
-    if (durationMin < MIN_THEFT_OFF_MINUTES) return; // ignore noise window
-
-    // cooldownUntil: bucket index below which theft detection is suppressed.
-    // Starts at STOP_COOLDOWN_BUCKETS to skip post-stop ADC settling (the ADC
-    // reads differently once vibration/heat from running stops — drops in this
-    // window are sensor stabilisation, not theft).
-    let cooldownUntil = STOP_COOLDOWN_BUCKETS;
-
-    for (let i = 0; i < seg.length - 1; i++) {
-      // Detect a refill inside the OFF segment (large upward spike = fuel added).
-      // After a refill the ADC overshoots then settles back down — that settling
-      // looks like a fuel drop and must not be counted as theft.
-      const rise = seg[i + 1].fuel - seg[i].fuel;
-      if (rise >= FUEL_REFILL_MIN_CHANGE) {
-        cooldownUntil = i + 1 + REFILL_COOLDOWN_BUCKETS;
-        continue;
-      }
-
-      if (i < cooldownUntil) continue; // inside settling / post-refill window
-
-      const drop = seg[i].fuel - seg[i + 1].fuel;
-      if (drop < FUEL_THEFT_MIN_CHANGE) continue;
-
-      // Scan backward to find where fuel was before this spike began.
-      // Stop at the first bucket that is below the drop endpoint + threshold —
-      // that is the true pre-spike baseline, regardless of spike duration.
-      let preBaseline = seg[0].fuel; // fallback: segment start
-      for (let k = i - 1; k >= 0; k--) {
-        if (seg[k].fuel < seg[i].fuel - FUEL_THEFT_MIN_CHANGE) {
-          preBaseline = seg[k].fuel;
-          break;
-        }
-      }
-
-      const postIdx   = Math.min(seg.length - 1, i + 1 + FAKE_SPIKE_WINDOW);
-      const netChange = preBaseline - seg[postIdx].fuel;
-      if (netChange < drop * FAKE_SPIKE_RECOVERY_RATIO) continue; // spike, not theft
-
-      totalTheft += drop;
-      if (!firstTheftAt) firstTheftAt = seg[i].timestamp.toISOString();
-    }
-  };
-
-  for (let i = 0; i < smoothed.length; i++) {
-    const isOff = smoothed[i].ignition === 0;
-
-    if (isOff) {
-      if (segStart === null) segStart = i;
-    } else {
-      // Segment ended
-      processSegment(segStart, i - 1);
-      segStart = null;
-    }
-  }
-  // Handle trailing OFF segment
-  processSegment(segStart, smoothed.length - 1);
-
-  return { amount: round(totalTheft, 2), at: firstTheftAt };
-}
-
-/**
- * 6. GENERATOR START TIME — first OFF→ON ignition transition.
+ * 4. GENERATOR START TIME — first OFF→ON ignition transition.
  *
  * @param {Array} rows - raw rows
  * @returns {string|null} ISO timestamp
@@ -583,7 +865,7 @@ function calculateGeneratorStartTime(rows) {
 }
 
 /**
- * 7. GENERATOR STOP TIME — last ON→OFF ignition transition.
+ * 5. GENERATOR STOP TIME — last ON→OFF ignition transition.
  *
  * @param {Array} rows - raw rows
  * @returns {string|null} ISO timestamp
@@ -596,7 +878,7 @@ function calculateGeneratorStopTime(rows) {
 }
 
 /**
- * 8. WORK TIME — total minutes ignition was ON.
+ * 6. WORK TIME — total minutes ignition was ON.
  *
  * @param {Array} rows - raw rows
  * @returns {number|null} minutes (1 decimal)
@@ -620,7 +902,7 @@ function calculateWorkTime(rows) {
 }
 
 /**
- * 9. FINAL FUEL VALUE — most recent calibrated fuel reading.
+ * 7. FINAL FUEL VALUE — most recent calibrated fuel reading.
  *
  * @param {Array<{timestamp,fuel,ignition}>} rawSeries (un-smoothed)
  * @returns {number|null} litres
@@ -748,4 +1030,14 @@ module.exports = {
   detectIgnitionTransitions,
   buildOnIntervalsFromIgnition,
   sumIntervals,
+  // New multi-layer detection exports (for testing)
+  detectFuelEvents,
+  isFakeSpike,
+  isFakeRise,
+  isRecoveryRise,
+  isStationaryDropRecovery,
+  isDropConfirmedAfterDelay,
+  isPostDropRecovery,
+  isPostRefuelFallback,
+  refuelConsolidation,
 };
