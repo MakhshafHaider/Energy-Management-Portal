@@ -419,7 +419,7 @@ async function getVehicleFuelSeries(req, res, next) {
     } = require('../services/analyticsService');
 
     // Build fuel series
-    const rawSeries = buildFuelIgnitionSeries(
+    const { series: rawSeries } = buildFuelIgnitionSeries(
       trackingRows, fuelCalibration, fuelSensorKey, calibrationMaxX
     );
 

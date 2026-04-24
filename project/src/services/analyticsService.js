@@ -51,6 +51,7 @@ const RISE_RECOVERY_EPS          = 2.0;  // L — tolerance in isRecoveryRise
 const RISE_RECOVERY_LOOKBACK_MIN = 7;    // min — lookback for isRecoveryRise
 const REFUEL_CONSOLIDATION_MIN   = 15;   // min — forward scan for refuel peak
 const MAX_SINGLE_READING_DROP    = 2.0;  // L — sensor jump flag
+const POWER_EVENT_SUPPRESSION_MIN = 60;  // min — suppress theft detection after a power event
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // MAIN ENTRY POINT
@@ -122,14 +123,14 @@ function calculateVehicleAnalytics(vehicleId, date, sensorKeys, trackingRows, wa
 
   // Build merged series over all rows (warmup + tracking)
   const allRows = [...warmupRows, ...trackingRows];
-  const rawSeries  = buildFuelIgnitionSeries(allRows, fuelCalibration, fuelSensorKey, calibrationMaxX);
+  const { series: rawSeries, powerEvents } = buildFuelIgnitionSeries(allRows, fuelCalibration, fuelSensorKey, calibrationMaxX);
   const smoothed   = smoothFuelIgnitionSeries(rawSeries);
 
   // dayStart is used to exclude warmup-period events from the results
   const dayStart = warmupRows.length > 0 ? new Date(trackingRows[0].timestamp) : null;
 
   // Detect theft drops and refuel events using the multi-layer algorithm
-  const { theftDrops, refuels } = detectFuelEvents(rawSeries, smoothed, dayStart);
+  const { theftDrops, refuels } = detectFuelEvents(rawSeries, smoothed, dayStart, powerEvents);
 
   // Narrow down to the day's smoothed series for consumption calculation
   const daySmoothed = dayStart
@@ -177,6 +178,7 @@ function calculateVehicleAnalytics(vehicleId, date, sensorKeys, trackingRows, wa
  */
 function buildFuelIgnitionSeries(rows, calibration, fuelSensorKey, calibrationMaxX) {
   const series = [];
+  const powerEvents = []; // timestamps of high-battery exclusions (device power events)
 
   for (const row of rows) {
     let fuel = null;
@@ -210,7 +212,12 @@ function buildFuelIgnitionSeries(rows, calibration, fuelSensorKey, calibrationMa
     if (fuel === null) {
       const batRaw = parseNumeric(row.battery);
       const maxAllowed = calibration ? calibrationMaxX * 2.0 : 6000;
-      if (batRaw !== null && batRaw <= maxAllowed && batRaw >= 0) {
+      if (batRaw !== null && batRaw > maxAllowed) {
+        // Battery far above calibration range: marks a device power event
+        // (e.g., charger connected, supply voltage spike). Record the timestamp
+        // so theft detection can guard against readings taken during power instability.
+        powerEvents.push(new Date(row.timestamp));
+      } else if (batRaw !== null && batRaw >= 0) {
         fuel = batRaw;
         needsCalibration = true;
       }
@@ -235,7 +242,7 @@ function buildFuelIgnitionSeries(rows, calibration, fuelSensorKey, calibrationMa
     });
   }
 
-  return series;
+  return { series, powerEvents };
 }
 
 /**
@@ -596,9 +603,10 @@ function isPostRefuelFallback(filtered, consolidationEnd, peakFuel, baseline) {
  * @param {Array<{timestamp:Date,fuel:number,ignition:0|1|null}>} raw       Raw series
  * @param {Array<{timestamp:Date,fuel:number,ignition:0|1|null}>} filtered  Smoothed series
  * @param {Date|null} dayStart  Exclude events before this timestamp (warmup exclusion)
+ * @param {Date[]} [powerEvents]  Timestamps of device power events (Battery > maxAllowed)
  * @returns {{ theftDrops: Array, refuels: Array }}
  */
-function detectFuelEvents(raw, filtered, dayStart) {
+function detectFuelEvents(raw, filtered, dayStart, powerEvents = []) {
   const theftDrops = [];
   const refuels    = [];
   let lastConfirmedDropTime = null;
@@ -645,6 +653,17 @@ function detectFuelEvents(raw, filtered, dayStart) {
 
       const totalConsumed = baseline - verifiedFuel;
       if (totalConsumed < DROP_ALERT_THRESHOLD) continue;
+
+      // Power event guard: if the device experienced a power event (Battery
+      // exceeded calibration range, e.g. charger spike or supply fluctuation)
+      // within the preceding POWER_EVENT_SUPPRESSION_MIN minutes, the ADC
+      // ramp-down during that event can look like a fuel drop. Skip theft
+      // detection for readings that fall within this unstable window.
+      const suppressWindowMs = POWER_EVENT_SUPPRESSION_MIN * 60 * 1000;
+      if (powerEvents.some(
+        (pe) => pe <= dropTime &&
+                dropTime.getTime() - pe.getTime() <= suppressWindowMs,
+      )) continue;
 
       // Layer 4a — still low after delay?
       if (!isDropConfirmedAfterDelay(filtered, dropTime, baseline)) continue;
@@ -1008,7 +1027,7 @@ function extractFuelSeries(rows, calibration, fuelSensorKey) {
     ? Math.max(...calibration.map((p) => p.x))
     : Infinity;
   return buildFuelIgnitionSeries(rows, calibration, fuelSensorKey, calibrationMaxX)
-    .map(({ timestamp, fuel }) => ({ timestamp, value: fuel }));
+    .series.map(({ timestamp, fuel }) => ({ timestamp, value: fuel }));
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
