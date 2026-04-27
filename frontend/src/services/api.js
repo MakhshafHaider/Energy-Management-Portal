@@ -346,8 +346,8 @@ export const getDashboardData = async (fleetId = 1735, date) => {
           generatorStopTime: stopTime,
           generatorStartTimeRaw: analytics.generatorStartTime,
           generatorStopTimeRaw: analytics.generatorStopTime,
-          dailyRuns: analytics.generatorStartTime
-            ? [{ date: formattedDate, startTime: analytics.generatorStartTime, stopTime: analytics.generatorStopTime, workTime: analytics.workTime || 0 }]
+          dailyRuns: (analytics.workTime || 0) > 0
+            ? [{ date: formattedDate, startTime: analytics.generatorStartTime, stopTime: analytics.generatorStopTime, workTime: analytics.workTime || 0, batteryHealth: analytics.batteryHealth ?? null }]
             : [],
           // Sensor info
           sensors: sensors,
@@ -444,12 +444,17 @@ function aggregateVehiclesAcrossDates(dayResults) {
         if (a.generatorStopTime)                           e.generatorStopTime  = a.generatorStopTime;
       }
 
-      if ((a.workTime || 0) > 0 || a.generatorStartTime) {
+      // Only create a timeline entry when there was actual qualifying run time.
+      // Relying solely on generatorStartTime caused phantom entries — e.g. a run
+      // ending at UTC 19:49 (= PKT 00:49 next day) was placing an "Apr 23" label
+      // on an Apr-22 entry because startTime's PKT date rolled over midnight.
+      if ((a.workTime || 0) > 0) {
         map.get(v.vehicleId).analytics.dailyRuns.push({
-          date:      dayDate,
-          startTime: a.generatorStartTime,
-          stopTime:  a.generatorStopTime,
-          workTime:  a.workTime || 0,
+          date:          dayDate,
+          startTime:     a.generatorStartTime,
+          stopTime:      a.generatorStopTime,
+          workTime:      a.workTime || 0,
+          batteryHealth: a.batteryHealth ?? null,
         });
       }
     }

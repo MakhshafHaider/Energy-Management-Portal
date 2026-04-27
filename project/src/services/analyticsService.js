@@ -52,6 +52,11 @@ const RISE_RECOVERY_LOOKBACK_MIN = 7;    // min — lookback for isRecoveryRise
 const REFUEL_CONSOLIDATION_MIN   = 15;   // min — forward scan for refuel peak
 const MAX_SINGLE_READING_DROP    = 2.0;  // L — sensor jump flag
 const POWER_EVENT_SUPPRESSION_MIN = 60;  // min — suppress theft detection after a power event
+const SPIKE_FORWARD_WINDOW_MINUTES = 30; // min — extended forward recovery window for isFakeSpike
+const MIN_VALID_FUEL_READING     = 10;   // L — discard ADC-near-zero garbage readings
+const POST_RUN_GUARD_MINUTES     = 30;   // min — suppress theft if generator ran recently
+const MIN_RUN_DURATION_MS        = 60 * 1000; // ms — minimum ON period to count as a run
+const MIN_BACKUP_VOLT_MV         = 10;        // mV — treat ignition as OFF if backup battery ≤ this
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // MAIN ENTRY POINT
@@ -235,10 +240,14 @@ function buildFuelIgnitionSeries(rows, calibration, fuelSensorKey, calibrationMa
 
     if (Number.isNaN(fuel)) continue;
 
+    // Discard calibrated readings below plausible minimum — ADC near-zero
+    // garbage (e.g. raw 264 → 10.3 L) distorts the median and causes false drops.
+    if (fuel < MIN_VALID_FUEL_READING) continue;
+
     series.push({
       timestamp: new Date(row.timestamp),
       fuel,
-      ignition: parseIgnitionState(row.ignition),
+      ignition: effectiveIgnition(row),
     });
   }
 
@@ -289,11 +298,12 @@ function smoothFuelIgnitionSeries(series, samples = FUEL_MEDIAN_SAMPLES) {
  * @returns {boolean}
  */
 function isFakeSpike(raw, dropTime) {
-  const wMs = SPIKE_WINDOW_MINUTES * 60 * 1000;
+  const backMs    = SPIKE_WINDOW_MINUTES * 60 * 1000;
+  const forwardMs = SPIKE_FORWARD_WINDOW_MINUTES * 60 * 1000;
   const win = raw.filter(
     (pt) =>
-      pt.timestamp >= new Date(dropTime.getTime() - wMs) &&
-      pt.timestamp <= new Date(dropTime.getTime() + wMs)
+      pt.timestamp >= new Date(dropTime.getTime() - backMs) &&
+      pt.timestamp <= new Date(dropTime.getTime() + forwardMs)
   );
   if (win.length < 2) return false;
 
@@ -341,11 +351,15 @@ function isFakeSpike(raw, dropTime) {
  * @returns {boolean}
  */
 function isFakeRise(raw, riseTime, baseline, peakFuel) {
-  const wMs = SPIKE_WINDOW_MINUTES * 60 * 1000;
+  // Asymmetric window: extend backward to catch cases where the raw series
+  // already shows peak-level readings before the smoothed "rise" (median
+  // artifact from a prior dip flushing out of the 5-sample window).
+  const backMs    = SPIKE_FORWARD_WINDOW_MINUTES * 60 * 1000; // 30 min
+  const forwardMs = SPIKE_WINDOW_MINUTES * 60 * 1000;         // 7 min
   const win = raw.filter(
     (pt) =>
-      pt.timestamp >= new Date(riseTime.getTime() - wMs) &&
-      pt.timestamp <= new Date(riseTime.getTime() + wMs)
+      pt.timestamp >= new Date(riseTime.getTime() - backMs) &&
+      pt.timestamp <= new Date(riseTime.getTime() + forwardMs)
   );
   if (win.length < 2) return false;
 
@@ -593,6 +607,34 @@ function isPostRefuelFallback(filtered, consolidationEnd, peakFuel, baseline) {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
+// POST-RUN GUARD — wasRecentlyRunning
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/**
+ * Returns true if the generator ran for at least MIN_RUN_DURATION_MS in the
+ * POST_RUN_GUARD_MINUTES window before `dropTime`. Fuel drops immediately
+ * after a confirmed run are consumption settling, not theft.
+ *
+ * @param {Array<{timestamp:Date,ignition:0|1|null}>} raw
+ * @param {Date} dropTime
+ * @returns {boolean}
+ */
+function wasRecentlyRunning(raw, dropTime) {
+  const lo = new Date(dropTime.getTime() - POST_RUN_GUARD_MINUTES * 60 * 1000);
+  let runStart = null;
+  for (const pt of raw) {
+    if (pt.timestamp < lo || pt.timestamp >= dropTime) continue;
+    if (pt.ignition === 1) {
+      if (!runStart) runStart = pt.timestamp;
+      if (pt.timestamp.getTime() - runStart.getTime() >= MIN_RUN_DURATION_MS) return true;
+    } else {
+      runStart = null;
+    }
+  }
+  return false;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
 // MAIN EVENT DETECTION — detectFuelEvents
 // ═══════════════════════════════════════════════════════════════════════════════
 
@@ -638,6 +680,10 @@ function detectFuelEvents(raw, filtered, dayStart, powerEvents = []) {
 
       const baseline = filtered[i].fuel;
       const dropTime = filtered[i + 1].timestamp;
+
+      // Post-run guard: fuel drops within 30 min of a >1 min generator run are
+      // consumption settling (or sensor re-stabilisation), not theft.
+      if (wasRecentlyRunning(raw, dropTime)) continue;
 
       // Forward scan within +SPIKE_WINDOW_MINUTES to find lowest confirmed fuel
       const scanEnd = new Date(dropTime.getTime() + SPIKE_WINDOW_MINUTES * 60 * 1000);
@@ -791,6 +837,23 @@ function parseIgnitionState(value) {
   return Number.isNaN(parsed) ? null : (parsed === 0 ? 0 : 1);
 }
 
+/**
+ * Effective ignition: treats ignition as OFF when backup battery voltage is
+ * at or below MIN_BACKUP_VOLT_MV. A reading near zero means the GPS device
+ * has no external power — the generator is not actually running regardless
+ * of the ignition bit.
+ *
+ * @param {Object} row - raw tracking row with .ignition and .backupBattery
+ * @returns {0|1|null}
+ */
+function effectiveIgnition(row) {
+  const ign = parseIgnitionState(row.ignition);
+  if (ign !== 1) return ign;
+  const batt = parseNumeric(row.backupBattery);
+  if (batt !== null && batt <= MIN_BACKUP_VOLT_MV) return 0;
+  return 1;
+}
+
 // ═══════════════════════════════════════════════════════════════════════════════
 // PARAMS PARSER
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -879,21 +942,42 @@ function calculateTotalEngineHours(rows) {
 function calculateGeneratorStartTime(rows) {
   if (rows.length === 0) return null;
   const transitions = detectIgnitionTransitions(rows);
-  const start = transitions.find((t) => t.from === 0 && t.to === 1);
-  return start ? start.timestamp.toISOString() : null;
+
+  // No transitions at all — check if device was ON the whole day
+  if (transitions.length === 0) {
+    const state = effectiveIgnition(rows[0]);
+    return state === 1 ? new Date(rows[0].timestamp).toISOString() : null;
+  }
+
+  // Use the first interval that meets the minimum-duration threshold.
+  // Ignoring sub-threshold blips prevents a 2-second noise event at midnight
+  // from being shown as the "start time" of a run that happened at noon.
+  const intervals = buildOnIntervalsFromIgnition(rows, transitions);
+  const first = intervals.find((iv) => iv.durationMinutes >= MIN_VALID_RUNNING_MINUTES);
+  return first ? first.start.toISOString() : null;
 }
 
 /**
- * 5. GENERATOR STOP TIME — last ON→OFF ignition transition.
+ * 5. GENERATOR STOP TIME — end of the last qualifying ON interval.
  *
  * @param {Array} rows - raw rows
- * @returns {string|null} ISO timestamp
+ * @returns {string|null} ISO timestamp, or null if generator is still running
  */
 function calculateGeneratorStopTime(rows) {
   if (rows.length === 0) return null;
   const transitions = detectIgnitionTransitions(rows);
-  const stops = transitions.filter((t) => t.from === 1 && t.to === 0);
-  return stops.length > 0 ? stops[stops.length - 1].timestamp.toISOString() : null;
+  if (transitions.length === 0) return null;
+
+  const intervals = buildOnIntervalsFromIgnition(rows, transitions);
+  const valid = intervals.filter((iv) => iv.durationMinutes >= MIN_VALID_RUNNING_MINUTES);
+  if (valid.length === 0) return null;
+
+  const last = valid[valid.length - 1];
+  // An open interval (generator still running) ends at the final tracking row.
+  // In that case there is no confirmed stop, so return null.
+  const lastRowMs = new Date(rows[rows.length - 1].timestamp).getTime();
+  if (Math.abs(last.end.getTime() - lastRowMs) < 1000) return null;
+  return last.end.toISOString();
 }
 
 /**
@@ -908,7 +992,7 @@ function calculateWorkTime(rows) {
   const transitions = detectIgnitionTransitions(rows);
 
   if (transitions.length === 0) {
-    const state = parseIgnitionState(rows[0].ignition);
+    const state = effectiveIgnition(rows[0]);
     if (state === 1) {
       const dur = new Date(rows[rows.length - 1].timestamp) - new Date(rows[0].timestamp);
       return round(dur / (1000 * 60), 1);
@@ -939,10 +1023,10 @@ function detectIgnitionTransitions(rows) {
   const transitions = [];
   if (rows.length < 2) return transitions;
 
-  let prev = parseIgnitionState(rows[0].ignition);
+  let prev = effectiveIgnition(rows[0]);
 
   for (let i = 1; i < rows.length; i++) {
-    const curr = parseIgnitionState(rows[i].ignition);
+    const curr = effectiveIgnition(rows[i]);
     if (curr === null) continue;
     if (prev !== null && curr !== prev) {
       transitions.push({ from: prev, to: curr, timestamp: new Date(rows[i].timestamp), rowIndex: i });
@@ -955,7 +1039,7 @@ function detectIgnitionTransitions(rows) {
 
 function buildOnIntervalsFromIgnition(rows, transitions) {
   const intervals = [];
-  const initial = parseIgnitionState(rows[0].ignition);
+  const initial = effectiveIgnition(rows[0]);
   let isOn = initial === 1;
   let start = isOn ? new Date(rows[0].timestamp) : null;
 
@@ -1038,6 +1122,7 @@ module.exports = {
   calculateVehicleAnalytics,
   // Exported for unit testing
   parseIgnitionState,
+  effectiveIgnition,
   parseParams,
   getParamValue,
   parseNumeric,
@@ -1051,6 +1136,7 @@ module.exports = {
   sumIntervals,
   // New multi-layer detection exports (for testing)
   detectFuelEvents,
+  wasRecentlyRunning,
   isFakeSpike,
   isFakeRise,
   isRecoveryRise,

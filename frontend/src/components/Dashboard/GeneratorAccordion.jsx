@@ -151,6 +151,11 @@ function DailyRunTimeline({ runs, startTimeFormatted, stopTimeFormatted }) {
 
       <ul className="space-y-2">
         {runs.map((run, idx) => {
+          // Use run.date (the UTC query date) as the day label — it corresponds
+          // to which TrackData table the data came from and is the stable anchor.
+          // Using startTime's PKT date caused phantom "Apr 23" entries when a
+          // run ending at e.g. UTC 19:49 (= PKT 00:49 next day) had its startTime
+          // roll over PKT midnight while the data was still from the Apr-22 table.
           const dateLabel = (() => {
             try {
               return new Date(run.date + 'T00:00:00').toLocaleDateString('en-US', {
@@ -163,7 +168,11 @@ function DailyRunTimeline({ runs, startTimeFormatted, stopTimeFormatted }) {
 
           const fmt = (iso) => {
             try {
-              return new Date(iso).toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' });
+              // DB stores PKT naive datetimes; the server (UTC) reads them as UTC,
+              // so display as UTC to recover the original PKT stored value.
+              return new Date(iso).toLocaleTimeString('en-US', {
+                hour: '2-digit', minute: '2-digit', timeZone: 'UTC',
+              });
             } catch {
               return iso;
             }
@@ -176,6 +185,15 @@ function DailyRunTimeline({ runs, startTimeFormatted, stopTimeFormatted }) {
           const dur      = workMins >= 60
             ? `${Math.round(workMins / 60 * 10) / 10} hrs`
             : workMins > 0 ? `${Math.round(workMins)} min` : '–';
+
+          // Detect when the session crosses local (PKT) midnight — stop is on a
+          // different calendar day than start. Without this indicator the display
+          // shows e.g. "06:13 AM – 01:31 AM" which looks reversed.
+          const crossesMidnight = !isLive && run.startTime && run.stopTime && (() => {
+            const startDay = new Date(run.startTime).toLocaleDateString('en-US', { timeZone: 'UTC' });
+            const stopDay  = new Date(run.stopTime).toLocaleDateString('en-US', { timeZone: 'UTC' });
+            return startDay !== stopDay;
+          })();
 
           return (
             <li key={idx} className="flex items-start gap-3 pl-1">
@@ -198,8 +216,21 @@ function DailyRunTimeline({ runs, startTimeFormatted, stopTimeFormatted }) {
                   </span>
                 </div>
                 <p className="text-xs text-gray-400 mt-0.5">
-                  {start} {isLive ? '→ ' : '– '}{stop}
+                  {start}
+                  {isLive ? ' → ' : ' – '}
+                  {stop}
+                  {crossesMidnight && (
+                    <span className="ml-1.5 inline-flex items-center text-[10px] font-medium text-amber-600 bg-amber-50 border border-amber-200 px-1.5 py-0.5 rounded-full leading-none">
+                      +1 day
+                    </span>
+                  )}
                 </p>
+                {run.batteryHealth != null && (
+                  <p className="text-[11px] text-gray-400 mt-0.5">
+                    <span className="font-medium text-gray-500">Battery:</span>{' '}
+                    {run.batteryHealth} mV
+                  </p>
+                )}
               </div>
             </li>
           );
