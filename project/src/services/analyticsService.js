@@ -959,10 +959,11 @@ function calculateFuelConsumption(dayFiltered, totalRefueled, preferredFuelPoint
       ? dayFiltered[firstOnIdx - 1].fuel
       : dayFiltered[firstOnIdx].fuel;
 
-    // Fuel reading just after the last run ends (or at run end if day ends running)
-    lastFuel = lastOnIdx < dayFiltered.length - 1
-      ? dayFiltered[lastOnIdx + 1].fuel
-      : dayFiltered[lastOnIdx].fuel;
+    // Fuel reading at the last ignition-ON moment.
+    // Using the point AFTER the last ON reading is unreliable for battery-fallback
+    // vehicles: the device battery recharges after the generator stops, raising the
+    // Battery ADC and making fuel appear to increase post-run.
+    lastFuel = dayFiltered[lastOnIdx].fuel;
   }
 
   const net = (firstFuel - lastFuel) + (totalRefueled || 0);

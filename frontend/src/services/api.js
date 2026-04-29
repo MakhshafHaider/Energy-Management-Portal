@@ -109,7 +109,7 @@ const validators = {
 
 // Helper function for making API calls
 const fetchApi = async (endpoint, options = {}) => {
-  const url = `${API_BASE_URL}${endpoint}`;
+  const url = `${endpoint}`;
 
   const config = {
     headers: {
