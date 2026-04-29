@@ -178,9 +178,12 @@ function DailyRunTimeline({ runs, startTimeFormatted, stopTimeFormatted }) {
             }
           };
 
+          // "Still running" only applies to today's data. Historical entries
+          // where the data window ended while running show the last known time.
+          const todayStr = new Date().toISOString().split('T')[0];
+          const isLive   = !!run.isOpen && run.date === todayStr;
           const start    = run.startTime ? fmt(run.startTime) : '–';
-          const stop     = run.stopTime  ? fmt(run.stopTime)  : 'Still running';
-          const isLive   = !run.stopTime;
+          const stop     = isLive ? 'Still running' : run.stopTime ? fmt(run.stopTime) : '–';
           const workMins = run.workTime || 0;
           const dur      = workMins >= 60
             ? `${Math.round(workMins / 60 * 10) / 10} hrs`
@@ -189,7 +192,7 @@ function DailyRunTimeline({ runs, startTimeFormatted, stopTimeFormatted }) {
           // Detect when the session crosses local (PKT) midnight — stop is on a
           // different calendar day than start. Without this indicator the display
           // shows e.g. "06:13 AM – 01:31 AM" which looks reversed.
-          const crossesMidnight = !isLive && run.startTime && run.stopTime && (() => {
+          const crossesMidnight = !isLive && run.startTime && run.stopTime && run.stopTime !== run.startTime && (() => {
             const startDay = new Date(run.startTime).toLocaleDateString('en-US', { timeZone: 'UTC' });
             const stopDay  = new Date(run.stopTime).toLocaleDateString('en-US', { timeZone: 'UTC' });
             return startDay !== stopDay;

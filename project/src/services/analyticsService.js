@@ -155,6 +155,7 @@ function calculateVehicleAnalytics(vehicleId, date, sensorKeys, trackingRows, wa
     fuelTheftAt,
     generatorStartTime: calculateGeneratorStartTime(trackingRows),
     generatorStopTime:  calculateGeneratorStopTime(trackingRows),
+    generatorRuns:      calculateGeneratorRunIntervals(trackingRows),
     workTime:           calculateWorkTime(trackingRows),
     fuel:               getFinalFuelValue(rawSeries),
   };
@@ -981,7 +982,35 @@ function calculateGeneratorStopTime(rows) {
 }
 
 /**
- * 6. WORK TIME — total minutes ignition was ON.
+ * 6. GENERATOR RUN INTERVALS — every qualifying ON interval for the day.
+ *
+ * Returns one entry per run, each with a real stop timestamp and an isOpen
+ * flag (true = generator was still ON at the last data row, i.e. no confirmed
+ * OFF transition). isOpen + today's date = "Still running"; isOpen on a past
+ * date = data ended while running, stop shows the last known time.
+ *
+ * @param {Array} rows - raw rows
+ * @returns {Array<{start:string, stop:string, isOpen:boolean, workMinutes:number}>}
+ */
+function calculateGeneratorRunIntervals(rows) {
+  if (rows.length === 0) return [];
+  const transitions = detectIgnitionTransitions(rows);
+  const allIntervals = buildOnIntervalsFromIgnition(rows, transitions);
+  const qualifying = allIntervals.filter((iv) => iv.durationMinutes >= MIN_VALID_RUNNING_MINUTES);
+  if (qualifying.length === 0) return [];
+
+  const lastRowMs = new Date(rows[rows.length - 1].timestamp).getTime();
+
+  return qualifying.map((iv) => ({
+    start:       iv.start.toISOString(),
+    stop:        iv.end.toISOString(),   // always a real timestamp
+    isOpen:      Math.abs(iv.end.getTime() - lastRowMs) < 1000, // true = no confirmed OFF
+    workMinutes: round(iv.durationMinutes, 1),
+  }));
+}
+
+/**
+ * 7. WORK TIME — total minutes ignition was ON.
  *
  * @param {Array} rows - raw rows
  * @returns {number|null} minutes (1 decimal)
@@ -1123,6 +1152,7 @@ module.exports = {
   // Exported for unit testing
   parseIgnitionState,
   effectiveIgnition,
+  calculateGeneratorRunIntervals,
   parseParams,
   getParamValue,
   parseNumeric,

@@ -1,6 +1,6 @@
 // API Service for Fleet Analytics Backend
 // Base URL configuration
-const API_BASE_URL = process.env.REACT_APP_API_URL || "http://localhost:3010";
+const API_BASE_URL ="http://192.168.21.216:3010";
 ;
 
 // Custom Error Classes for different validation failures
@@ -16,7 +16,7 @@ export class ValidationError extends Error {
 export class NotFoundError extends Error {
   constructor(message) {
     super(message);
-    this.name = 'NotFoundError';
+    this.name = 'NotFoundError';  
     this.statusCode = 404;
   }
 }
@@ -337,7 +337,6 @@ export const getDashboardData = async (fleetId = 1735, date) => {
           fuelLevel: analytics.fuel || '-',
           fuelConsumption: analytics.fuelConsumption || 0,
           fuelTheft: analytics.fuelTheft || 0,
-          fuelTheftAt: analytics.fuelTheftAt || null,
           fuelRefilled: analytics.fuelRefilled || 0,
           engineHours: analytics.totalEngineHours || 0,
           workTime: analytics.workTime || 0,
@@ -346,8 +345,8 @@ export const getDashboardData = async (fleetId = 1735, date) => {
           generatorStopTime: stopTime,
           generatorStartTimeRaw: analytics.generatorStartTime,
           generatorStopTimeRaw: analytics.generatorStopTime,
-          dailyRuns: (analytics.workTime || 0) > 0
-            ? [{ date: formattedDate, startTime: analytics.generatorStartTime, stopTime: analytics.generatorStopTime, workTime: analytics.workTime || 0, batteryHealth: analytics.batteryHealth ?? null }]
+          dailyRuns: analytics.generatorStartTime
+            ? [{ date: formattedDate, startTime: analytics.generatorStartTime, stopTime: analytics.generatorStopTime, workTime: analytics.workTime || 0 }]
             : [],
           // Sensor info
           sensors: sensors,
@@ -422,7 +421,6 @@ function aggregateVehiclesAcrossDates(dayResults) {
             totalEngineHours:   a.totalEngineHours    ?? 0,
             fuelRefilled:       a.fuelRefilled        ?? 0,
             fuelTheft:          a.fuelTheft           ?? 0,
-            fuelTheftAt:        a.fuelTheftAt         ?? null,
             generatorStartTime: a.generatorStartTime  ?? null,
             generatorStopTime:  a.generatorStopTime   ?? null,
             workTime:           a.workTime            ?? 0,
@@ -436,7 +434,6 @@ function aggregateVehiclesAcrossDates(dayResults) {
         e.totalEngineHours = Math.round(((e.totalEngineHours || 0) + (a.totalEngineHours || 0)) * 100) / 100;
         e.fuelRefilled     = Math.round(((e.fuelRefilled     || 0) + (a.fuelRefilled     || 0)) * 100) / 100;
         e.fuelTheft        = Math.round(((e.fuelTheft        || 0) + (a.fuelTheft        || 0)) * 100) / 100;
-        if (!e.fuelTheftAt && a.fuelTheftAt) e.fuelTheftAt = a.fuelTheftAt;
         e.workTime         = Math.round(((e.workTime         || 0) + (a.workTime         || 0)) * 10)  / 10;
         if (a.batteryHealth != null) e.batteryHealth = a.batteryHealth;
         if (a.fuel          != null) e.fuel          = a.fuel;
@@ -444,17 +441,12 @@ function aggregateVehiclesAcrossDates(dayResults) {
         if (a.generatorStopTime)                           e.generatorStopTime  = a.generatorStopTime;
       }
 
-      // Only create a timeline entry when there was actual qualifying run time.
-      // Relying solely on generatorStartTime caused phantom entries — e.g. a run
-      // ending at UTC 19:49 (= PKT 00:49 next day) was placing an "Apr 23" label
-      // on an Apr-22 entry because startTime's PKT date rolled over midnight.
-      if ((a.workTime || 0) > 0) {
+      if ((a.workTime || 0) > 0 || a.generatorStartTime) {
         map.get(v.vehicleId).analytics.dailyRuns.push({
-          date:          dayDate,
-          startTime:     a.generatorStartTime,
-          stopTime:      a.generatorStopTime,
-          workTime:      a.workTime || 0,
-          batteryHealth: a.batteryHealth ?? null,
+          date:      dayDate,
+          startTime: a.generatorStartTime,
+          stopTime:  a.generatorStopTime,
+          workTime:  a.workTime || 0,
         });
       }
     }
@@ -503,7 +495,6 @@ export const getDashboardDataRange = async (fleetId = 1735, startDate, endDate) 
       fuelLevel:        analytics.fuel          || '-',
       fuelConsumption:  analytics.fuelConsumption  || 0,
       fuelTheft:        analytics.fuelTheft        || 0,
-      fuelTheftAt:      analytics.fuelTheftAt      || null,
       fuelRefilled:     analytics.fuelRefilled     || 0,
       engineHours:      analytics.totalEngineHours || 0,
       workTime:         analytics.workTime         || 0,
