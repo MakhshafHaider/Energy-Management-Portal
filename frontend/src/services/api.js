@@ -1,6 +1,6 @@
 // API Service for Fleet Analytics Backend
 // Base URL configuration
-const API_BASE_URL ="http://192.168.21.216:3010";
+const API_BASE_URL ="http://192.168.20.69:3010";
 ;
 
 // Custom Error Classes for different validation failures

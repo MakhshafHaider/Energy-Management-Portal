@@ -188,10 +188,8 @@ function DailyRunTimeline({ runs, startTimeFormatted, stopTimeFormatted }) {
           const dur      = workMins >= 60
             ? `${Math.round(workMins / 60 * 10) / 10} hrs`
             : workMins > 0 ? `${Math.round(workMins)} min` : '–';
-          // Show "? L" when engine ran for ≥30 min but fuel sensor reported 0 or null
-          // (0 on a long run = device voltage fallback, not genuine zero consumption).
-          const fuelUnknown = workMins >= 30 && !run.fuelConsumption;
-          const fuelL = workMins > 0 && run.fuelConsumption > 0 ? run.fuelConsumption : null;
+          const fuelUnknown = false;
+          const fuelL = workMins > 0 && (run.fuelConsumption || 0) > 0 ? run.fuelConsumption : null;
 
           // Detect when the session crosses local (PKT) midnight — stop is on a
           // different calendar day than start. Without this indicator the display
