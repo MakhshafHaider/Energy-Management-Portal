@@ -188,6 +188,10 @@ function DailyRunTimeline({ runs, startTimeFormatted, stopTimeFormatted }) {
           const dur      = workMins >= 60
             ? `${Math.round(workMins / 60 * 10) / 10} hrs`
             : workMins > 0 ? `${Math.round(workMins)} min` : '–';
+          // Show "? L" when engine ran for ≥30 min but fuel sensor reported 0 or null
+          // (0 on a long run = device voltage fallback, not genuine zero consumption).
+          const fuelUnknown = workMins >= 30 && !run.fuelConsumption;
+          const fuelL = workMins > 0 && run.fuelConsumption > 0 ? run.fuelConsumption : null;
 
           // Detect when the session crosses local (PKT) midnight — stop is on a
           // different calendar day than start. Without this indicator the display
@@ -210,13 +214,25 @@ function DailyRunTimeline({ runs, startTimeFormatted, stopTimeFormatted }) {
               <div className="flex-1 min-w-0 pb-1">
                 <div className="flex items-center justify-between gap-2">
                   <span className="text-sm font-medium text-gray-700">{dateLabel}</span>
-                  <span className={`text-xs font-semibold px-2 py-0.5 rounded-full ${
-                    isLive
-                      ? 'bg-emerald-100 text-emerald-700'
-                      : 'bg-slate-100 text-slate-600'
-                  }`}>
-                    {dur}
-                  </span>
+                  <div className="flex items-center gap-1.5 flex-shrink-0">
+                    {fuelL != null && (
+                      <span className="text-xs font-semibold px-2 py-0.5 rounded-full bg-orange-50 text-orange-600 border border-orange-100">
+                        {fuelL} L
+                      </span>
+                    )}
+                    {fuelUnknown && (
+                      <span className="text-xs font-semibold px-2 py-0.5 rounded-full bg-gray-50 text-gray-400 border border-gray-200" title="Fuel sensor data unavailable for this day">
+                        ? L
+                      </span>
+                    )}
+                    <span className={`text-xs font-semibold px-2 py-0.5 rounded-full ${
+                      isLive
+                        ? 'bg-emerald-100 text-emerald-700'
+                        : 'bg-slate-100 text-slate-600'
+                    }`}>
+                      {dur}
+                    </span>
+                  </div>
                 </div>
                 <p className="text-xs text-gray-400 mt-0.5">
                   {start}

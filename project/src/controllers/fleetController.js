@@ -120,7 +120,6 @@ async function getVehicleAnalytics(req, res, next) {
       sensorKeys,
       trackingRows
     );
-
     res.json({
       success: true,
       vehicleId: parsedVehicleId,

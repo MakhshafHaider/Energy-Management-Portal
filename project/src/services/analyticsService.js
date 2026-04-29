@@ -128,7 +128,7 @@ function calculateVehicleAnalytics(vehicleId, date, sensorKeys, trackingRows, wa
 
   // Build merged series over all rows (warmup + tracking)
   const allRows = [...warmupRows, ...trackingRows];
-  const { series: rawSeries, powerEvents } = buildFuelIgnitionSeries(allRows, fuelCalibration, fuelSensorKey, calibrationMaxX);
+  const { series: rawSeries, powerEvents, preferredFuelPoints, batteryFallbackPoints } = buildFuelIgnitionSeries(allRows, fuelCalibration, fuelSensorKey, calibrationMaxX);
   const smoothed   = smoothFuelIgnitionSeries(rawSeries);
 
   // dayStart is used to exclude warmup-period events from the results
@@ -148,7 +148,7 @@ function calculateVehicleAnalytics(vehicleId, date, sensorKeys, trackingRows, wa
 
   return {
     batteryHealth:      calculateBatteryHealth(trackingRows),
-    fuelConsumption:    calculateFuelConsumption(daySmoothed, totalRefueled),
+    fuelConsumption:    calculateFuelConsumption(daySmoothed, totalRefueled, preferredFuelPoints, batteryFallbackPoints),
     totalEngineHours:   calculateTotalEngineHours(trackingRows),
     fuelRefilled:       round(totalRefueled, 2) || 0,
     fuelTheft:          round(totalTheft, 2) || 0,
@@ -185,10 +185,14 @@ function calculateVehicleAnalytics(vehicleId, date, sensorKeys, trackingRows, wa
 function buildFuelIgnitionSeries(rows, calibration, fuelSensorKey, calibrationMaxX) {
   const series = [];
   const powerEvents = []; // timestamps of high-battery exclusions (device power events)
+  let preferredFuelPoints = 0; // points from FuelLevel or Params (reliable)
+  let batteryFallbackPoints = 0; // points from Battery column (may be device voltage)
 
   for (const row of rows) {
     let fuel = null;
     let needsCalibration = false;
+
+    let usedBatteryFallback = false;
 
     // 1. FuelLevel column (already litres)
     const fl = parseNumeric(row.fuelLevel);
@@ -226,6 +230,7 @@ function buildFuelIgnitionSeries(rows, calibration, fuelSensorKey, calibrationMa
       } else if (batRaw !== null && batRaw >= 0) {
         fuel = batRaw;
         needsCalibration = true;
+        usedBatteryFallback = true;
       }
     }
 
@@ -245,6 +250,12 @@ function buildFuelIgnitionSeries(rows, calibration, fuelSensorKey, calibrationMa
     // garbage (e.g. raw 264 → 10.3 L) distorts the median and causes false drops.
     if (fuel < MIN_VALID_FUEL_READING) continue;
 
+    if (usedBatteryFallback) {
+      batteryFallbackPoints++;
+    } else {
+      preferredFuelPoints++;
+    }
+
     series.push({
       timestamp: new Date(row.timestamp),
       fuel,
@@ -252,7 +263,7 @@ function buildFuelIgnitionSeries(rows, calibration, fuelSensorKey, calibrationMa
     });
   }
 
-  return { series, powerEvents };
+  return { series, powerEvents, preferredFuelPoints, batteryFallbackPoints };
 }
 
 /**
@@ -907,19 +918,60 @@ function calculateBatteryHealth(rows) {
 }
 
 /**
- * 2. FUEL CONSUMPTION — mass-balance formula.
+ * 2. FUEL CONSUMPTION — run-window mass-balance formula.
  *
- *   consumed = max(0, (firstFuel - lastFuel) + totalRefueled)
+ *   consumed = max(0, (fuelBeforeFirstRun - fuelAfterLastRun) + totalRefueled)
+ *
+ * Uses the fuel reading just BEFORE the first ignition-ON moment and just
+ * AFTER the last ignition-ON moment. This excludes passive sensor drift that
+ * accumulates before the generator starts and after it stops, which would
+ * otherwise inflate the reported consumption.
+ *
+ * Falls back to full-day first/last if no ignition-ON readings exist (e.g.
+ * sensor-only vehicles or days with no running activity).
  *
  * @param {Array<{timestamp,fuel,ignition}>} dayFiltered  Day's smoothed series
  * @param {number} totalRefueled  Sum of all confirmed refuel events for the day
  * @returns {number|null}
  */
-function calculateFuelConsumption(dayFiltered, totalRefueled) {
+function calculateFuelConsumption(dayFiltered, totalRefueled, preferredFuelPoints = 0, batteryFallbackPoints = 0) {
   if (!dayFiltered || dayFiltered.length === 0) return null;
-  const firstFuel = dayFiltered[0].fuel;
-  const lastFuel  = dayFiltered[dayFiltered.length - 1].fuel;
-  return round(Math.max(0, (firstFuel - lastFuel) + (totalRefueled || 0)), 2);
+
+
+  const firstOnIdx = dayFiltered.findIndex((pt) => pt.ignition === 1);
+  const lastOnIdx  = (() => {
+    for (let i = dayFiltered.length - 1; i >= 0; i--) {
+      if (dayFiltered[i].ignition === 1) return i;
+    }
+    return -1;
+  })();
+
+  let firstFuel;
+  let lastFuel;
+
+  if (firstOnIdx === -1) {
+    // No running periods — full-day span (sensor-only or idle day)
+    firstFuel = dayFiltered[0].fuel;
+    lastFuel  = dayFiltered[dayFiltered.length - 1].fuel;
+  } else {
+    // Fuel reading just before the first run starts (or at run start if day begins running)
+    firstFuel = firstOnIdx > 0
+      ? dayFiltered[firstOnIdx - 1].fuel
+      : dayFiltered[firstOnIdx].fuel;
+
+    // Fuel reading just after the last run ends (or at run end if day ends running)
+    lastFuel = lastOnIdx < dayFiltered.length - 1
+      ? dayFiltered[lastOnIdx + 1].fuel
+      : dayFiltered[lastOnIdx].fuel;
+  }
+
+  const net = (firstFuel - lastFuel) + (totalRefueled || 0);
+
+  // If net fuel went up significantly (sensor reading device voltage, not fuel ADC),
+  // flag as unavailable.
+  if (net < -1.0) return null;
+
+  return round(Math.max(0, net), 2);
 }
 
 /**

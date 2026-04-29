@@ -8,7 +8,7 @@ const logger = require('./utils/logger');
 const { getPool: getCrmPool, closePool: closeCrmPool } = require('./db/crmDb');
 const { getPool: getTrackingPool, closePool: closeTrackingPool } = require('./db/trackingDb');
 
-const PORT = process.env.PORT || 3000;
+const PORT = process.env.PORT || 3010;
 
 /**
  * Initialize database connections with clear error handling.

@@ -346,7 +346,7 @@ export const getDashboardData = async (fleetId = 1735, date) => {
           generatorStartTimeRaw: analytics.generatorStartTime,
           generatorStopTimeRaw: analytics.generatorStopTime,
           dailyRuns: analytics.generatorStartTime
-            ? [{ date: formattedDate, startTime: analytics.generatorStartTime, stopTime: analytics.generatorStopTime, workTime: analytics.workTime || 0 }]
+            ? [{ date: formattedDate, startTime: analytics.generatorStartTime, stopTime: analytics.generatorStopTime, workTime: analytics.workTime || 0, fuelConsumption: analytics.fuelConsumption ?? null }]
             : [],
           // Sensor info
           sensors: sensors,
@@ -443,10 +443,11 @@ function aggregateVehiclesAcrossDates(dayResults) {
 
       if ((a.workTime || 0) > 0 || a.generatorStartTime) {
         map.get(v.vehicleId).analytics.dailyRuns.push({
-          date:      dayDate,
-          startTime: a.generatorStartTime,
-          stopTime:  a.generatorStopTime,
-          workTime:  a.workTime || 0,
+          date:            dayDate,
+          startTime:       a.generatorStartTime,
+          stopTime:        a.generatorStopTime,
+          workTime:        a.workTime        || 0,
+          fuelConsumption: a.fuelConsumption ?? null,
         });
       }
     }
