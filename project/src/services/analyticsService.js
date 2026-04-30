@@ -146,9 +146,18 @@ function calculateVehicleAnalytics(vehicleId, date, sensorKeys, trackingRows, wa
   const totalTheft    = theftDrops.reduce((s, d) => s + d.consumed, 0);
   const fuelTheftAt   = theftDrops.length > 0 ? theftDrops[0].at : null;
 
+  // For consumption: only refuels that occurred before the last ignition-on moment.
+  // Post-run refuels top up the tank after the engine stops and must not offset
+  // the mass-balance formula (which already anchors lastFuel at the last run end).
+  const lastIgnPt = [...daySmoothed].reverse().find((pt) => pt.ignition === 1);
+  const lastIgnTime = lastIgnPt ? lastIgnPt.timestamp : null;
+  const consumptionRefueled = lastIgnTime
+    ? refuels.filter((r) => new Date(r.at) < lastIgnTime).reduce((s, r) => s + r.added, 0)
+    : totalRefueled;
+
   return {
     batteryHealth:      calculateBatteryHealth(trackingRows),
-    fuelConsumption:    calculateFuelConsumption(daySmoothed, totalRefueled, preferredFuelPoints, batteryFallbackPoints),
+    fuelConsumption:    calculateFuelConsumption(daySmoothed, consumptionRefueled, preferredFuelPoints, batteryFallbackPoints),
     totalEngineHours:   calculateTotalEngineHours(trackingRows),
     fuelRefilled:       round(totalRefueled, 2) || 0,
     fuelTheft:          round(totalTheft, 2) || 0,
@@ -375,14 +384,16 @@ function isFakeRise(raw, riseTime, baseline, peakFuel) {
   );
   if (win.length < 2) return false;
 
-  const startFuel = win[0].fuel;
   const finalFuel = win[win.length - 1].fuel;
 
-  // Check 3: fell back to or below baseline → fake
-  if (finalFuel <= startFuel) return true;
+  // Check 3: fell back to or below pre-rise baseline → fake.
+  // Use the provided baseline (smoothed pre-rise level) rather than win[0].fuel,
+  // because with sparse readings the 30-min backward window may start AFTER the
+  // actual refuel, making win[0] already reflect the post-refuel level.
+  if (finalFuel <= baseline) return true;
 
-  // Check 4: did not sustain enough gain → fake
-  if (Math.abs(finalFuel - startFuel) <= RISE_THRESHOLD) return true;
+  // Check 4: did not sustain enough gain from baseline → fake
+  if (Math.abs(finalFuel - baseline) <= RISE_THRESHOLD) return true;
 
   // Check 5: sub-rise scan
   for (let j = 0; j < win.length - 1; j++) {
